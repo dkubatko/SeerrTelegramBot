@@ -7,8 +7,10 @@ image small and the runtime dependency list at exactly one package.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 from typing import Any, Awaitable, Callable
+from urllib.parse import urlparse
 
 import aiohttp
 
@@ -176,3 +178,29 @@ async def sleep_or_stop(stop: asyncio.Event, seconds: float) -> None:
 
 def keyboard(rows: list[list[dict[str, Any]]]) -> dict[str, Any]:
     return {"inline_keyboard": rows}
+
+
+def is_valid_button_url(url: str | None) -> bool:
+    """Whether Telegram will accept this URL on an inline button.
+
+    Telegram requires a resolvable-looking host and rejects the whole message
+    otherwise, so a container name like `http://jellyseerr:5055` would cost us
+    the entire approval card rather than just its link.
+    """
+    if not url:
+        return False
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return False
+
+    host = parsed.hostname
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+    # A bare hostname carries no dot; Telegram wants something domain-shaped.
+    return "." in host.strip(".") and not host.endswith(".")

@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from app.bot import SeerrTelegramBot  # noqa: E402
 from app.config import Config, normalize_seerr_url  # noqa: E402
 from app.formatting import CAPTION_LIMIT, RequestNotification  # noqa: E402
+from app.telegram import is_valid_button_url  # noqa: E402
 from app.seerr import SeerrError  # noqa: E402
 from mock_seerr import REQUESTS, TEST_PAYLOAD, pending_payload  # noqa: E402
 
@@ -169,6 +170,32 @@ class TestConfigLoading(unittest.TestCase):
         self.assertIsNone(config.rejected_group_chat_id)
 
 
+class TestButtonUrls(unittest.TestCase):
+    """Telegram rejects the whole message over one bad button URL."""
+
+    def test_domain_and_ip_hosts_are_usable(self):
+        for url in (
+            "http://192.168.1.196:5055/movie/155",
+            "http://127.0.0.1:5055/movie/155",
+            "https://seerr.example.com/movie/155",
+            "http://seerr.lan:5055/tv/1396",
+        ):
+            self.assertTrue(is_valid_button_url(url), url)
+
+    def test_bare_hostnames_are_not_usable(self):
+        for url in (
+            "http://jellyseerr:5055/movie/155",  # a Docker container name
+            "http://mock-seerr:5055/movie/155",
+            "http://localhost:5055/movie/155",
+            "http://overseerr/movie/155",
+        ):
+            self.assertFalse(is_valid_button_url(url), url)
+
+    def test_junk_is_not_usable(self):
+        for url in (None, "", "not a url", "ftp://seerr.example.com", "://x"):
+            self.assertFalse(is_valid_button_url(url), repr(url))
+
+
 class TestUrlNormalization(unittest.TestCase):
     def test_variants_collapse_to_an_origin(self):
         for raw in [
@@ -234,6 +261,25 @@ class TestWebhookRouting(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [b["callback_data"] for b in buttons], ["approve:1", "decline:1"]
         )
+
+    async def test_unusable_seerr_url_still_delivers_the_card(self):
+        """A container-name SEERR_URL must cost the link, never the card."""
+        bot, telegram, _ = build_bot(seerr_public_url="http://jellyseerr:5055")
+        await bot.handle_webhook(pending_payload(REQUESTS["1"]))
+
+        rows = telegram.sent[0]["markup"]["inline_keyboard"]
+        self.assertEqual(len(rows), 1, "the link row should have been dropped")
+        self.assertEqual(
+            [b["callback_data"] for b in rows[0]], ["approve:1", "decline:1"]
+        )
+
+    async def test_usable_public_url_keeps_the_link(self):
+        bot, telegram, _ = build_bot(seerr_public_url="http://192.168.1.10:5055")
+        await bot.handle_webhook(pending_payload(REQUESTS["1"]))
+
+        rows = telegram.sent[0]["markup"]["inline_keyboard"]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[1][0]["url"], "http://192.168.1.10:5055/movie/155")
 
     async def test_test_notification_confirms_in_telegram(self):
         bot, telegram, _ = build_bot()

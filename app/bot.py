@@ -22,7 +22,7 @@ from .seerr import (
     SeerrClient,
     SeerrError,
 )
-from .telegram import TelegramClient, TelegramError, keyboard
+from .telegram import TelegramClient, TelegramError, is_valid_button_url, keyboard
 
 logger = logging.getLogger(__name__)
 
@@ -90,18 +90,24 @@ class SeerrTelegramBot:
                 },
             ]
         ]
-        link = notification.media_url(self.config.seerr_public_url)
+        link = self._link_row(notification)
         if link:
-            rows.append([{"text": "🔗 Open in Seerr", "url": link}])
+            rows.append(link)
         return keyboard(rows)
+
+    def _link_row(
+        self, notification: RequestNotification
+    ) -> list[dict[str, Any]] | None:
+        link = notification.media_url(self.config.seerr_public_url)
+        if not is_valid_button_url(link):
+            return None
+        return [{"text": "🔗 Open in Seerr", "url": link}]
 
     def _link_only_keyboard(
         self, notification: RequestNotification
     ) -> dict[str, Any] | None:
-        link = notification.media_url(self.config.seerr_public_url)
-        if not link:
-            return None
-        return keyboard([[{"text": "🔗 Open in Seerr", "url": link}]])
+        row = self._link_row(notification)
+        return keyboard([row]) if row else None
 
     # --------------------------------------------------------------- webhooks
 
@@ -180,9 +186,19 @@ class SeerrTelegramBot:
                 logger.warning("Poster send failed (%s); falling back to text", exc)
 
         if message is None:
-            message = await self.telegram.send_message(
-                chat_id, notification.pending_text(MESSAGE_LIMIT), markup
-            )
+            try:
+                message = await self.telegram.send_message(
+                    chat_id, notification.pending_text(MESSAGE_LIMIT), markup
+                )
+            except TelegramError as exc:
+                # Losing the card entirely would leave the request invisible.
+                # The decision buttons carry callback data and are always
+                # valid, so retry without whatever else Telegram objected to.
+                logger.warning("Card rejected (%s); retrying without the link", exc)
+                markup = keyboard([markup["inline_keyboard"][0]])
+                message = await self.telegram.send_message(
+                    chat_id, notification.pending_text(MESSAGE_LIMIT), markup
+                )
 
         if notification.request_id:
             self._remember(

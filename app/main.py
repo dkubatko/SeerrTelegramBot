@@ -15,7 +15,13 @@ from .bot import SeerrTelegramBot
 from .config import Config, ConfigError
 from .seerr import SeerrClient, SeerrError
 from .server import build_app
-from .telegram import TelegramClient, TelegramError, poll_updates, sleep_or_stop
+from .telegram import (
+    TelegramClient,
+    TelegramError,
+    is_valid_button_url,
+    poll_updates,
+    sleep_or_stop,
+)
 
 logger = logging.getLogger("seerrbot")
 
@@ -75,6 +81,15 @@ async def startup_checks(bot: SeerrTelegramBot, config: Config) -> None:
         )
     except SeerrError as exc:
         logger.error("Seerr API key check failed: %s", exc)
+
+    if not is_valid_button_url(f"{config.seerr_public_url}/movie/1"):
+        logger.warning(
+            "Cards will omit the 'Open in Seerr' link: Telegram will not accept "
+            "a button pointing at %s, because it needs a host with a domain or "
+            "an IP address. Set SEERR_PUBLIC_URL to an address your phone can "
+            "open, such as http://192.168.1.10:5055.",
+            config.seerr_public_url,
+        )
 
     if config.rejected_group_chat_id is not None:
         logger.error(
