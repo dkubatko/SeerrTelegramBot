@@ -11,3 +11,4 @@ tests/
 scripts/
 README.md
 docker-compose*.yml
+assets/

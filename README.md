@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="" width="128" height="128">
+</p>
+
 # Seerr → Telegram approval bot
 
 A small shim that replaces Seerr's "request pending approval" notification with
@@ -302,6 +306,15 @@ docker-compose.test.yml down` first.
 **"Cannot reach Telegram, retrying".** Network or DNS is not ready yet; the bot
 keeps retrying with backoff. It only gives up, and exits, when Telegram actively
 rejects the token.
+
+## The icon
+
+`assets/` holds the icon at 512, 256, 128, and 64 px, drawn by
+`scripts/make_logo.py` (`pip install pillow` first). The mark is original: an
+iris for the "seer" around a shape that reads as both a play triangle and a
+send arrow, with a tick for approval. It borrows the three projects' colours —
+Plex amber, Seerr indigo, Telegram blue — and none of their logos, which are
+trademarks belonging to those projects.
 
 ## Notes on behaviour
 
