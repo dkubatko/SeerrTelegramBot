@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -127,6 +129,44 @@ def callback(
         "message": message,
         "from": {"id": chat_id if user_id is None else user_id, "username": "dan"},
     }
+
+
+class TestConfigLoading(unittest.TestCase):
+    """ADMIN_CHAT_ID is refused at load time, not merely documented as private."""
+
+    BASE_ENV = {
+        "TELEGRAM_BOT_TOKEN": "token",
+        "SEERR_URL": "http://seerr:5055",
+        "SEERR_API_KEY": "key",
+    }
+
+    def _load(self, admin_chat_id: str | None) -> Config:
+        env = dict(self.BASE_ENV)
+        if admin_chat_id is not None:
+            env["ADMIN_CHAT_ID"] = admin_chat_id
+        with mock.patch.dict(os.environ, env, clear=True):
+            return Config.from_env()
+
+    def test_group_chat_id_is_rejected_at_load(self):
+        for group_id in ("-100500", "-1001234567890"):
+            config = self._load(group_id)
+            self.assertIsNone(config.admin_chat_id, group_id)
+            self.assertEqual(config.rejected_group_chat_id, int(group_id))
+
+    def test_zero_is_rejected_at_load(self):
+        config = self._load("0")
+        self.assertIsNone(config.admin_chat_id)
+        self.assertEqual(config.rejected_group_chat_id, 0)
+
+    def test_private_chat_id_is_accepted(self):
+        config = self._load("1101242859")
+        self.assertEqual(config.admin_chat_id, 1101242859)
+        self.assertIsNone(config.rejected_group_chat_id)
+
+    def test_unset_is_neither_configured_nor_rejected(self):
+        config = self._load(None)
+        self.assertIsNone(config.admin_chat_id)
+        self.assertIsNone(config.rejected_group_chat_id)
 
 
 class TestUrlNormalization(unittest.TestCase):
@@ -274,6 +314,25 @@ class TestDecisions(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(seerr.calls, [])
         self.assertIn("not authorized", telegram.answers[0]["text"])
+
+    async def test_group_admin_chat_id_refuses_button_presses(self):
+        """The whole point of rejecting group IDs: no member inherits approval."""
+        config = make_config(admin_chat_id=None, rejected_group_chat_id=-100500)
+        bot = SeerrTelegramBot(config, FakeTelegram(), (seerr := FakeSeerr()))
+        telegram = bot.telegram
+
+        for presser in (-100500, 42, 999):
+            await bot.handle_update(
+                {
+                    "callback_query": callback(
+                        "approve:1", chat_id=-100500, user_id=presser
+                    )
+                }
+            )
+
+        self.assertEqual(seerr.calls, [])
+        self.assertEqual(len(telegram.answers), 3)
+        self.assertTrue(all(a["alert"] for a in telegram.answers))
 
     async def test_press_from_another_user_in_the_chat_is_rejected(self):
         """Identity comes from the sender, never from the chat alone."""
