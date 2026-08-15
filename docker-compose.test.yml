@@ -1,0 +1,54 @@
+# Local test stack. Runs the real bot container against a fake Seerr, so
+# nothing touches your live instance.
+#
+#   docker compose -f docker-compose.test.yml up -d --build
+#
+# With no .env at all it also fakes Telegram, so the whole thing runs with zero
+# credentials. Put a real TELEGRAM_BOT_TOKEN and ADMIN_CHAT_ID in .env and set
+# TELEGRAM_API_BASE= (empty) to drive it from your actual phone instead.
+
+services:
+  bot:
+    build: .
+    image: seerr-telegram-bot:latest
+    container_name: seerr-bot-test
+    restart: unless-stopped
+    ports:
+      - "8420:8420"
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-demo-token}
+      TELEGRAM_API_BASE: ${TELEGRAM_API_BASE-http://mock-telegram:9111}
+      SEERR_URL: http://mock-seerr:5055
+      SEERR_API_KEY: test-api-key
+      ADMIN_CHAT_ID: ${ADMIN_CHAT_ID:-4242}
+      LOG_LEVEL: DEBUG
+    depends_on:
+      - mock-seerr
+      - mock-telegram
+
+  mock-seerr:
+    image: seerr-telegram-bot:latest
+    container_name: seerr-bot-test-mock-seerr
+    restart: unless-stopped
+    ports:
+      - "5055:5055"
+    healthcheck:
+      disable: true
+    volumes:
+      - ./scripts:/app/scripts:ro
+    command: >
+      python scripts/mock_seerr.py
+      --port 5055
+      --bot-url http://bot:8420/webhook
+
+  mock-telegram:
+    image: seerr-telegram-bot:latest
+    container_name: seerr-bot-test-mock-telegram
+    restart: unless-stopped
+    ports:
+      - "9111:9111"
+    healthcheck:
+      disable: true
+    volumes:
+      - ./scripts:/app/scripts:ro
+    command: python scripts/mock_telegram.py --port 9111
