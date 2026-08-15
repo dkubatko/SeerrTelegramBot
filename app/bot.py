@@ -230,18 +230,15 @@ class SeerrTelegramBot:
         elif "message" in update:
             await self._handle_message(update["message"])
 
-    def _may_administer(self, chat_id: Any, user_id: Any) -> bool:
-        """Both the chat and the person must be right.
+    def _is_admin(self, chat_id: Any, user_id: Any) -> bool:
+        """The admin, speaking in their own direct conversation with the bot.
 
-        Checking only the chat would let any member of a group approve, since a
-        group's ID is shared by everyone in it.
+        In a private chat the chat ID and the sender's user ID are the same
+        number, so requiring both to match rejects anything that is not that
+        one-to-one conversation.
         """
-        if self.config.admin_chat_id is None:
-            return False
-        return (
-            chat_id == self.config.admin_chat_id
-            and user_id in self.config.approver_user_ids
-        )
+        admin = self.config.admin_chat_id
+        return admin is not None and chat_id == admin and user_id == admin
 
     async def _handle_message(self, message: dict[str, Any]) -> None:
         text = (message.get("text") or "").strip()
@@ -251,11 +248,11 @@ class SeerrTelegramBot:
         if chat_id is None or not text.startswith("/"):
             return
 
-        # Strip the @BotName suffix Telegram adds in group chats.
+        # Commands may be typed with the bot's handle, as /start@MySeerrBot.
         command = text.split()[0].lstrip("/").split("@")[0].lower()
 
         if command in {"start", "id"}:
-            await self._cmd_start(chat_id, chat, message.get("from") or {})
+            await self._cmd_start(chat_id, chat)
             return
         if command == "help":
             await self.telegram.send_message(chat_id, HELP_TEXT)
@@ -274,13 +271,14 @@ class SeerrTelegramBot:
             )
             return
 
-        if not self._may_administer(chat_id, user_id):
+        if not self._is_admin(chat_id, user_id):
             logger.info(
                 "Ignoring /%s from chat %s / user %s", command, chat_id, user_id
             )
             await self.telegram.send_message(
                 chat_id,
-                "This bot only takes commands from its configured admin chat.",
+                "This bot only takes commands from its admin, in a direct "
+                "conversation.",
             )
             return
 
@@ -293,18 +291,21 @@ class SeerrTelegramBot:
         else:
             await self.telegram.send_message(chat_id, HELP_TEXT)
 
-    async def _cmd_start(
-        self, chat_id: int, chat: dict[str, Any], sender: dict[str, Any]
-    ) -> None:
-        user_id = sender.get("id")
+    async def _cmd_start(self, chat_id: int, chat: dict[str, Any]) -> None:
+        if (chat.get("type") or "private") != "private":
+            await self.telegram.send_message(
+                chat_id,
+                "This bot only works in a direct conversation. Message me "
+                "privately and send /start there.",
+            )
+            return
+
         lines = [
             "👋 <b>Seerr approval bot</b>",
             "",
-            f"This chat's ID: <code>{chat_id}</code>",
+            f"Your chat ID: <code>{chat_id}</code>",
+            "",
         ]
-        if user_id and user_id != chat_id:
-            lines.append(f"Your user ID: <code>{user_id}</code>")
-        lines.append("")
 
         if self.config.admin_chat_id is None:
             lines += [
@@ -313,16 +314,16 @@ class SeerrTelegramBot:
             ]
         elif chat_id == self.config.admin_chat_id:
             lines += [
-                "✅ This chat is the configured admin chat. "
+                "✅ You are the configured admin. "
                 "Pending Seerr requests will arrive here.",
                 "",
                 "Use /test to verify the Seerr connection.",
             ]
         else:
             lines += [
-                "ℹ️ Approvals are routed to a different chat, so the buttons "
-                "here would not work. The ID above is what you would put in "
-                "Seerr's user notification settings.",
+                "ℹ️ Approvals go to a different user, so the buttons here would "
+                "not work. The ID above is what you would put in Seerr's user "
+                "notification settings.",
             ]
         await self.telegram.send_message(chat_id, "\n".join(lines))
 
@@ -468,23 +469,8 @@ class SeerrTelegramBot:
             )
             return
 
-        if not self.config.approver_user_ids:
-            logger.error(
-                "Refusing %s of request %s: ADMIN_CHAT_ID %s is a group, so no "
-                "approver can be inferred. Set APPROVER_USER_IDS.",
-                decision,
-                request_id,
-                self.config.admin_chat_id,
-            )
-            await self.telegram.answer_callback(
-                callback_id,
-                "No approvers are configured. Set APPROVER_USER_IDS on the bot.",
-                alert=True,
-            )
-            return
-
         user_id = (callback.get("from") or {}).get("id")
-        if not self._may_administer(chat_id, user_id):
+        if not self._is_admin(chat_id, user_id):
             logger.warning(
                 "Rejected %s of request %s from chat %s / user %s",
                 decision,

@@ -76,27 +76,20 @@ async def startup_checks(bot: SeerrTelegramBot, config: Config) -> None:
     except SeerrError as exc:
         logger.error("Seerr API key check failed: %s", exc)
 
-    if config.admin_chat_id is None:
+    if config.rejected_group_chat_id is not None:
+        logger.error(
+            "ADMIN_CHAT_ID %s is a group chat, which is not supported. "
+            "Send /start to the bot in a direct message and use the ID it "
+            "replies with. Requests are dropped until then.",
+            config.rejected_group_chat_id,
+        )
+    elif config.admin_chat_id is None:
         logger.warning(
             "ADMIN_CHAT_ID is not set. Send /start to the bot to get your chat ID, "
             "set the variable, and restart. Requests are dropped until then."
         )
-        return
-
-    logger.info("Approvals will be sent to chat %s", config.admin_chat_id)
-    if not config.approver_user_ids:
-        logger.error(
-            "ADMIN_CHAT_ID %s is a group chat, so the approver cannot be "
-            "inferred from it. Set APPROVER_USER_IDS to the Telegram user IDs "
-            "allowed to approve, or every group member could. Button presses "
-            "are refused until then.",
-            config.admin_chat_id,
-        )
     else:
-        logger.info(
-            "Approvers: %s",
-            ", ".join(str(uid) for uid in sorted(config.approver_user_ids)),
-        )
+        logger.info("Approvals will be sent to chat %s", config.admin_chat_id)
 
 
 async def run() -> int:

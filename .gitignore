@@ -3,5 +3,12 @@ __pycache__/
 .venv/
 venv/
 .env
-.env.local
+.env.*
+!.env.example
 .DS_Store
+
+# Editor swap files: a swap of .env holds .env's secrets.
+*.swp
+*.swo
+*~
+.*.sw?

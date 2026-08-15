@@ -69,7 +69,7 @@ class EndToEndTest(unittest.IsolatedAsyncioTestCase):
             seerr_public_url=self.seerr_url,
             seerr_api_key="test-api-key",
             admin_chat_id=ADMIN_CHAT,
-            approver_user_ids=frozenset({ADMIN_CHAT}),
+            rejected_group_chat_id=None,
             webhook_auth_token=AUTH_TOKEN,
             webhook_path="/webhook",
             port=0,

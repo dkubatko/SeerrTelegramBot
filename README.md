@@ -59,12 +59,11 @@ else: it drops incoming webhooks and refuses every other command, since there is
 nobody to authorize against yet. The startup log carries the Seerr connection
 verdict in the meantime, so `docker logs` is how you check it at this stage.
 
-> **Use a private chat.** A group's chat ID is shared by everyone in it, so it
-> cannot identify an approver on its own. If you do point `ADMIN_CHAT_ID` at a
-> group, you must also set `APPROVER_USER_IDS` to the Telegram user IDs allowed
-> to decide; until you do, the bot refuses every button press rather than
-> trusting group membership. In a private chat the ID *is* your user ID, so
-> nothing extra is needed.
+> **Direct conversation only.** The bot works one-to-one with its admin, and
+> nowhere else. A group's ID identifies the room rather than a person, so it
+> cannot say who pressed a button; setting `ADMIN_CHAT_ID` to a group ID is
+> refused at startup and the bot behaves as if it were unconfigured. `/start`
+> in a group tells you to message the bot privately instead.
 
 ### 4. Point Seerr at the bot
 
@@ -244,8 +243,7 @@ is needed: the bot polls Telegram, and only Seerr needs to reach port 8420.
 | `TELEGRAM_BOT_TOKEN` | yes | — | Token from @BotFather |
 | `SEERR_URL` | yes | — | Where the container reaches Seerr; a trailing `/api/v1` is stripped |
 | `SEERR_API_KEY` | yes | — | Seerr → Settings → General → API Key |
-| `ADMIN_CHAT_ID` | no | — | Private chat that receives requests and may press buttons |
-| `APPROVER_USER_IDS` | no | `ADMIN_CHAT_ID` | Comma-separated user IDs allowed to approve; required only when `ADMIN_CHAT_ID` is a group |
+| `ADMIN_CHAT_ID` | no | — | Your private chat ID; receives requests and may press buttons |
 | `SEERR_PUBLIC_URL` | no | `SEERR_URL` | Address used for "Open in Seerr" link buttons |
 | `WEBHOOK_AUTH_TOKEN` | no | — | If set, Seerr must send it as the `Authorization` header |
 | `PORT` | no | `8420` | Webhook listener port |
@@ -262,13 +260,13 @@ is needed: the bot polls Telegram, and only Seerr needs to reach port 8420.
 | --- | --- | --- |
 | `/start`, `/id` | anyone | Replies with this chat's ID |
 | `/help` | anyone | Command list |
-| `/test` | approver | Read-only check of the Seerr connection |
-| `/status` | approver | Pending / approved / declined counts |
-| `/pending` | approver | Lists up to 10 open requests, each with buttons |
+| `/test` | admin | Read-only check of the Seerr connection |
+| `/status` | admin | Pending / approved / declined counts |
+| `/pending` | admin | Lists up to 10 open requests, each with buttons |
 
-"Approver" means the message came from the admin chat *and* from a user in
-`APPROVER_USER_IDS`. Both conditions are checked for commands and button
-presses alike. Before `ADMIN_CHAT_ID` is configured, only the first two work.
+"Admin" means both the chat and the sender are `ADMIN_CHAT_ID` — the direct
+conversation with you and nobody else. The same check guards commands and
+button presses. Before `ADMIN_CHAT_ID` is configured, only the first two work.
 
 `/pending` is the way to catch up on requests that arrived while the bot was
 down, since webhooks are not retried by Seerr.

@@ -23,7 +23,6 @@ services:
       SEERR_URL: http://mock-seerr:5055
       SEERR_API_KEY: test-api-key
       ADMIN_CHAT_ID: ${ADMIN_CHAT_ID:-4242}
-      APPROVER_USER_IDS: ${APPROVER_USER_IDS:-}
       LOG_LEVEL: DEBUG
     depends_on:
       - mock-seerr

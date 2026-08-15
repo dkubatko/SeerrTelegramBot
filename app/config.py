@@ -35,18 +35,6 @@ def _int(name: str, default: int | None = None) -> int | None:
         raise ConfigError(f"{name} must be an integer, got {value!r}") from exc
 
 
-def _int_set(name: str) -> frozenset[int]:
-    value = _clean(name)
-    if not value:
-        return frozenset()
-    try:
-        return frozenset(int(part) for part in value.split(",") if part.strip())
-    except ValueError as exc:
-        raise ConfigError(
-            f"{name} must be a comma-separated list of integers, got {value!r}"
-        ) from exc
-
-
 def _bool(name: str, default: bool = False) -> bool:
     value = _clean(name)
     if value is None:
@@ -73,7 +61,7 @@ class Config:
     seerr_public_url: str
     seerr_api_key: str
     admin_chat_id: int | None
-    approver_user_ids: frozenset[int]
+    rejected_group_chat_id: int | None
     webhook_auth_token: str | None
     webhook_path: str
     port: int
@@ -91,13 +79,14 @@ class Config:
         seerr_url = normalize_seerr_url(_required("SEERR_URL"))
         public = _clean("SEERR_PUBLIC_URL")
 
-        # Authorization is per-user, not per-chat: in a group every member can
-        # press a button, so the approver list cannot be inferred from a group
-        # ID. A private chat's ID *is* its user's ID, so that case is implicit.
+        # Only a direct conversation with the bot is supported. A private
+        # chat's ID is its user's ID, which is what makes the admin
+        # identifiable; group IDs are negative and identify nobody, so they are
+        # refused rather than accepted as a chat to take orders from.
         admin_chat_id = _int("ADMIN_CHAT_ID")
-        approvers = _int_set("APPROVER_USER_IDS")
-        if not approvers and admin_chat_id is not None and admin_chat_id > 0:
-            approvers = frozenset({admin_chat_id})
+        rejected_group_chat_id = None
+        if admin_chat_id is not None and admin_chat_id <= 0:
+            rejected_group_chat_id, admin_chat_id = admin_chat_id, None
 
         return cls(
             telegram_bot_token=_required("TELEGRAM_BOT_TOKEN"),
@@ -111,7 +100,7 @@ class Config:
             seerr_public_url=normalize_seerr_url(public) if public else seerr_url,
             seerr_api_key=_required("SEERR_API_KEY"),
             admin_chat_id=admin_chat_id,
-            approver_user_ids=approvers,
+            rejected_group_chat_id=rejected_group_chat_id,
             webhook_auth_token=_clean("WEBHOOK_AUTH_TOKEN"),
             webhook_path=path.rstrip("/") or "/webhook",
             port=_int("PORT", 8420),
