@@ -81,11 +81,11 @@ class SeerrTelegramBot:
         rows: list[list[dict[str, Any]]] = [
             [
                 {
-                    "text": "✅ Approve",
+                    "text": "Approve",
                     "callback_data": f"approve:{notification.request_id}",
                 },
                 {
-                    "text": "🚫 Deny",
+                    "text": "Deny",
                     "callback_data": f"decline:{notification.request_id}",
                 },
             ]
@@ -101,7 +101,7 @@ class SeerrTelegramBot:
         link = notification.media_url(self.config.seerr_public_url)
         if not is_valid_button_url(link):
             return None
-        return [{"text": "🔗 Open in Seerr", "url": link}]
+        return [{"text": "Open in Seerr", "url": link}]
 
     def _link_only_keyboard(
         self, notification: RequestNotification
@@ -223,15 +223,15 @@ class SeerrTelegramBot:
         await self._finalize_message(sent, decision, "the Seerr web UI")
 
     async def _finalize_message(
-        self, sent: SentMessage, decision: str, actor: str, note: str | None = None
+        self, sent: SentMessage, decision: str, actor: str
     ) -> None:
         limit = CAPTION_LIMIT if sent.is_photo else MESSAGE_LIMIT
-        text = sent.notification.resolved_text(decision, actor, note)
+        text = sent.notification.resolved_text(decision, actor, limit)
         try:
             await self.telegram.edit_text(
                 sent.chat_id,
                 sent.message_id,
-                text[:limit],
+                text,
                 is_caption=sent.is_photo,
                 reply_markup=self._link_only_keyboard(sent.notification),
             )

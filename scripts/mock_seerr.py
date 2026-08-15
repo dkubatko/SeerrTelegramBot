@@ -24,7 +24,7 @@ SETTINGS: web.AppKey[dict[str, Any]] = web.AppKey("settings", dict)
 
 API_KEY = "test-api-key"
 
-POSTER = "https://image.tmdb.org/t/p/w600_and_h900_bestv2/qJ2tW6WMUDux911r6m7haRef0WH.jpg"
+POSTER_BASE = "https://image.tmdb.org/t/p/w600_and_h900_bestv2"
 
 REQUESTS: dict[str, dict[str, Any]] = {
     "1": {
@@ -43,6 +43,19 @@ REQUESTS: dict[str, dict[str, Any]] = {
         "requestedBy": {"id": 3, "displayName": "bob", "email": "bob@example.com"},
         "seasons": [{"id": 1, "seasonNumber": 1}, {"id": 2, "seasonNumber": 2}],
     },
+    # Everything the card can show at once: long synopsis, 4K, many seasons.
+    "3": {
+        "id": 3,
+        "status": 1,
+        "is4k": True,
+        "media": {"id": 12, "mediaType": "tv", "tmdbId": 1396, "status": 3},
+        "requestedBy": {
+            "id": 4,
+            "displayName": "Danylo Kubatko",
+            "email": "dan@example.com",
+        },
+        "seasons": [{"id": n, "seasonNumber": n} for n in range(1, 6)],
+    },
 }
 
 TITLES = {
@@ -56,7 +69,13 @@ TITLES = {
         "name": "Breaking Bad",
         "firstAirDate": "2008-01-20",
         "posterPath": "/ggFHVNu6YYI5L9pCfOacjizRGt.jpg",
-        "overview": "A high school chemistry teacher turns to a life of crime.",
+        "overview": (
+            "Walter White, a New Mexico chemistry teacher, is diagnosed with "
+            "Stage III cancer and given a prognosis of two years left to live. "
+            "He becomes filled with a sense of fearlessness and an unrelenting "
+            "desire to secure his family's financial future at any cost as he "
+            "enters the dangerous world of drugs and crime."
+        ),
     },
 }
 
@@ -155,7 +174,9 @@ def pending_payload(record: dict[str, Any]) -> dict[str, Any]:
         "event": f"New {'Movie' if kind == 'movie' else 'Series'} Request",
         "subject": f"{title} ({year})" if year else title,
         "message": details.get("overview", ""),
-        "image": POSTER if details.get("posterPath") else "",
+        "image": f"{POSTER_BASE}{details['posterPath']}"
+        if details.get("posterPath")
+        else "",
         "media": {
             "media_type": kind,
             "tmdbId": str(media["tmdbId"]),

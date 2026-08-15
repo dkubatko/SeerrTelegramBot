@@ -242,6 +242,44 @@ class TestPayloadParsing(unittest.TestCase):
         text = RequestNotification(payload).pending_text(CAPTION_LIMIT)
         self.assertLessEqual(len(text), CAPTION_LIMIT)
 
+    def test_card_orders_title_description_details_then_requester(self):
+        text = RequestNotification(pending_payload(REQUESTS["3"])).pending_text(4096)
+        paragraphs = text.split("\n\n")
+
+        self.assertEqual(len(paragraphs), 3)
+        self.assertIn("Breaking Bad", paragraphs[0].split("\n")[0])
+        self.assertIn("<i>Walter White", paragraphs[0].split("\n")[1])
+        self.assertIn("Requested Seasons", paragraphs[1])
+        self.assertTrue(paragraphs[2].startswith("👤 Requested by"))
+
+    def test_decision_line_follows_the_requester(self):
+        notification = RequestNotification(pending_payload(REQUESTS["3"]))
+        text = notification.resolved_text("approve", "@dan", 4096)
+        lines = text.split("\n\n")[-1].split("\n")
+
+        self.assertTrue(lines[0].startswith("👤 Requested by"))
+        self.assertEqual(lines[1], "✅ Approved by <b>@dan</b>")
+        self.assertNotIn("Approved", text.split("\n")[0])
+
+    def test_denied_reads_as_one_line(self):
+        notification = RequestNotification(pending_payload(REQUESTS["1"]))
+        text = notification.resolved_text("decline", "the Seerr web UI", 4096)
+        self.assertIn("🚫 Denied by <b>the Seerr web UI</b>", text)
+
+    def test_paragraphs_collapse_when_there_is_nothing_to_show(self):
+        text = RequestNotification(
+            {"notification_type": "MEDIA_PENDING", "subject": "Bare"}
+        ).pending_text(4096)
+        self.assertEqual(text, "📺 <b>Bare</b>")
+
+    def test_description_is_dropped_rather_than_crowding_a_caption(self):
+        payload = pending_payload(REQUESTS["3"]) | {"message": "x" * 5000}
+        text = RequestNotification(payload).pending_text(CAPTION_LIMIT)
+
+        self.assertLessEqual(len(text), CAPTION_LIMIT)
+        self.assertIn("Requested Seasons", text)
+        self.assertTrue(text.split("\n\n")[-1].startswith("👤 Requested by"))
+
     def test_seasons_appear_in_the_message(self):
         text = RequestNotification(pending_payload(REQUESTS["2"])).pending_text(1024)
         self.assertIn("Requested Seasons", text)
@@ -483,8 +521,9 @@ class TestCommands(unittest.IsolatedAsyncioTestCase):
         bot, telegram, _ = build_bot()
         await bot.handle_update(self._message("/pending"))
 
-        self.assertIn("2</b> pending", telegram.sent[0]["text"])
-        self.assertEqual(len(telegram.sent), 3)  # header plus two requests
+        open_requests = len(REQUESTS)
+        self.assertIn(f"{open_requests}</b> pending", telegram.sent[0]["text"])
+        self.assertEqual(len(telegram.sent), open_requests + 1)  # header, then each
         self.assertEqual(
             telegram.sent[1]["markup"]["inline_keyboard"][0][0]["callback_data"],
             "approve:1",

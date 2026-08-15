@@ -2,26 +2,32 @@
 
 from __future__ import annotations
 
+import re
 from html import escape
 from typing import Any
 
 CAPTION_LIMIT = 1024
 MESSAGE_LIMIT = 4096
 
-DECISION_HEADERS = {
-    "approve": "✅ <b>Approved</b>",
-    "decline": "🚫 <b>Denied</b>",
+DECISIONS = {
+    "approve": "✅ Approved",
+    "decline": "🚫 Denied",
 }
+
+# Shortest description worth keeping; below this the line is just noise.
+MIN_DESCRIPTION = 40
 
 
 def esc(value: Any) -> str:
     return escape(str(value if value is not None else ""), quote=False)
 
 
-def _truncate(text: str, limit: int) -> str:
+def _truncate_escaped(text: str, limit: int) -> str:
+    """Shorten already-escaped text without leaving a split HTML entity."""
     if len(text) <= limit:
         return text
-    return text[: max(0, limit - 1)].rstrip() + "…"
+    cut = re.sub(r"&[a-zA-Z]*$", "", text[: max(0, limit - 1)])
+    return cut.rstrip() + "…"
 
 
 class RequestNotification:
@@ -63,38 +69,42 @@ class RequestNotification:
         kind = "movie" if self.media_type == "movie" else "tv"
         return f"{seerr_url}/{kind}/{self.tmdb_id}"
 
-    def _detail_lines(self) -> list[str]:
-        lines = []
-        if self.has_requester:
-            lines.append(f"👤 Requested by <b>{esc(self.requested_by)}</b>")
-        for name, value in self.extra:
-            if value:
-                lines.append(f"• {esc(name)}: {esc(value)}")
-        return lines
-
     def pending_text(self, limit: int) -> str:
-        icon = "🎬" if self.media_type == "movie" else "📺"
-        head = [f"{icon} <b>{esc(self.subject)}</b>", *self._detail_lines()]
-        header = "\n".join(head)
-        if not self.overview:
-            return _truncate(header, limit)
-        # Reserve room for the header and the blank separator line.
-        room = limit - len(header) - 2
-        if room < 80:
-            return _truncate(header, limit)
-        return f"{header}\n\n<i>{esc(_truncate(self.overview, room - 8))}</i>"
+        return self._compose(limit)
 
-    def resolved_text(self, decision: str, actor: str, note: str | None = None) -> str:
-        header = DECISION_HEADERS.get(decision, "<b>Updated</b>")
+    def resolved_text(self, decision: str, actor: str, limit: int) -> str:
+        verdict = DECISIONS.get(decision, "Updated")
+        return self._compose(limit, f"{verdict} by <b>{esc(actor)}</b>")
+
+    def _compose(self, limit: int, decision: str | None = None) -> str:
+        """Title and description, then request details, then who is involved.
+
+        Each of those is its own paragraph, and empty ones disappear rather
+        than leaving a gap.
+        """
         icon = "🎬" if self.media_type == "movie" else "📺"
-        lines = [
-            f"{header} — {icon} <b>{esc(self.subject)}</b>",
-            *self._detail_lines(),
-            f"🔨 Decided by {esc(actor)}",
-        ]
-        if note:
-            lines.append(esc(note))
-        return "\n".join(lines)
+        title = f"{icon} <b>{esc(self.subject)}</b>"
+
+        details = "\n".join(
+            f"{esc(name)}: <b>{esc(value)}</b>" for name, value in self.extra if value
+        )
+
+        people = []
+        if self.has_requester:
+            people.append(f"👤 Requested by <b>{esc(self.requested_by)}</b>")
+        if decision:
+            people.append(decision)
+
+        paragraphs = [p for p in (details, "\n".join(people)) if p]
+
+        # Whatever the fixed parts do not use is available to the description.
+        spent = len(title) + sum(len(p) + 2 for p in paragraphs)
+        room = limit - spent - len("\n<i></i>")
+        description = ""
+        if self.overview and room >= MIN_DESCRIPTION:
+            description = f"\n<i>{_truncate_escaped(esc(self.overview), room)}</i>"
+
+        return "\n\n".join([title + description, *paragraphs])
 
 
 def actor_name(user: dict[str, Any]) -> str:
