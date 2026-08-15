@@ -81,6 +81,12 @@ The bot parses Seerr's stock payload, so there is no JSON to edit. If you have
 customized it, make sure it still contains `notification_type`, `subject`,
 `image`, and the `{{request}}` block with `request_id`.
 
+Those three are the types the bot has purpose-built handling for. Anything else
+you tick here is dropped unless `FORWARD_OTHER_NOTIFICATIONS=true`, which
+relays it to the admin chat as plain text. Leave that off and let Seerr's own
+Telegram agent handle "now available" and issue events: it can notify whoever
+made the request, on their own chat ID, which this bot never does.
+
 Pending Approval is the one that actually sends you a card. Approved and
 Declined are what let the bot notice a decision you made in the **web UI**: it
 rewrites the matching Telegram card to "Approved" and strips its buttons,
@@ -249,7 +255,7 @@ is needed: the bot polls Telegram, and only Seerr needs to reach port 8420.
 | `PORT` | no | `8420` | Webhook listener port |
 | `WEBHOOK_PATH` | no | `/webhook` | Webhook path; `POST /` also works |
 | `LOG_LEVEL` | no | `INFO` | `DEBUG` logs every payload and update |
-| `FORWARD_OTHER_NOTIFICATIONS` | no | `false` | Relay non-pending notification types as plain messages |
+| `FORWARD_OTHER_NOTIFICATIONS` | no | `false` | Relay notification types the bot has no card for (available, failed, issues) to the admin chat as plain text |
 | `NOTIFY_ON_START` | no | `false` | Send a short message to the admin chat on boot |
 | `SEERR_TIMEOUT` | no | `15` | Seconds before a Seerr call gives up |
 | `TELEGRAM_API_BASE` | no | `https://api.telegram.org` | For a self-hosted Bot API server or testing |
