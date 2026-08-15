@@ -309,8 +309,7 @@ rejects the token.
 
 ## The icon
 
-`assets/` holds the icon at 512, 256, 128, and 64 px, drawn by
-`scripts/make_logo.py` (`pip install pillow` first). The mark is original: an
+`assets/` holds the icon at 512, 256, 128, and 64 px. The mark is original: an
 iris for the "seer" around a shape that reads as both a play triangle and a
 send arrow, with a tick for approval. It borrows the three projects' colours —
 Plex amber, Seerr indigo, Telegram blue — and none of their logos, which are
