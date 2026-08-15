@@ -230,15 +230,24 @@ class SeerrTelegramBot:
         elif "message" in update:
             await self._handle_message(update["message"])
 
-    def _is_authorized(self, chat_id: int) -> bool:
+    def _may_administer(self, chat_id: Any, user_id: Any) -> bool:
+        """Both the chat and the person must be right.
+
+        Checking only the chat would let any member of a group approve, since a
+        group's ID is shared by everyone in it.
+        """
+        if self.config.admin_chat_id is None:
+            return False
         return (
-            self.config.admin_chat_id is None or chat_id == self.config.admin_chat_id
+            chat_id == self.config.admin_chat_id
+            and user_id in self.config.approver_user_ids
         )
 
     async def _handle_message(self, message: dict[str, Any]) -> None:
         text = (message.get("text") or "").strip()
         chat = message.get("chat") or {}
         chat_id = chat.get("id")
+        user_id = (message.get("from") or {}).get("id")
         if chat_id is None or not text.startswith("/"):
             return
 
@@ -252,21 +261,26 @@ class SeerrTelegramBot:
             await self.telegram.send_message(chat_id, HELP_TEXT)
             return
 
-        if not self._is_authorized(chat_id):
-            logger.info("Ignoring /%s from unauthorized chat %s", command, chat_id)
-            await self.telegram.send_message(
-                chat_id,
-                "This bot only takes commands from its configured admin chat.",
-            )
-            return
-
-        # Before ADMIN_CHAT_ID is set every chat counts as authorized, so keep
-        # the commands that expose library contents unavailable until it is.
-        if self.config.admin_chat_id is None and command in {"status", "pending"}:
+        # Until ADMIN_CHAT_ID is set there is nobody to authorize against, so
+        # every remaining command stays shut. They would otherwise expose the
+        # Seerr address, version, and library contents to any passer-by who
+        # found the bot.
+        if self.config.admin_chat_id is None:
             await self.telegram.send_message(
                 chat_id,
                 "Set <code>ADMIN_CHAT_ID</code> and restart the bot before using "
-                "this command.",
+                "this command. Check <code>docker logs</code> for the Seerr "
+                "connection status in the meantime.",
+            )
+            return
+
+        if not self._may_administer(chat_id, user_id):
+            logger.info(
+                "Ignoring /%s from chat %s / user %s", command, chat_id, user_id
+            )
+            await self.telegram.send_message(
+                chat_id,
+                "This bot only takes commands from its configured admin chat.",
             )
             return
 
@@ -454,9 +468,29 @@ class SeerrTelegramBot:
             )
             return
 
-        if chat_id != self.config.admin_chat_id:
+        if not self.config.approver_user_ids:
+            logger.error(
+                "Refusing %s of request %s: ADMIN_CHAT_ID %s is a group, so no "
+                "approver can be inferred. Set APPROVER_USER_IDS.",
+                decision,
+                request_id,
+                self.config.admin_chat_id,
+            )
+            await self.telegram.answer_callback(
+                callback_id,
+                "No approvers are configured. Set APPROVER_USER_IDS on the bot.",
+                alert=True,
+            )
+            return
+
+        user_id = (callback.get("from") or {}).get("id")
+        if not self._may_administer(chat_id, user_id):
             logger.warning(
-                "Rejected %s of request %s from chat %s", decision, request_id, chat_id
+                "Rejected %s of request %s from chat %s / user %s",
+                decision,
+                request_id,
+                chat_id,
+                user_id,
             )
             await self.telegram.answer_callback(
                 callback_id, "You are not authorized to decide this.", alert=True

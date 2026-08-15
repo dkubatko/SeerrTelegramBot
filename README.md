@@ -54,12 +54,17 @@ Send `/start` to your bot. It replies with the chat ID. Put that in
 docker compose up -d
 ```
 
-Until `ADMIN_CHAT_ID` is set the bot answers `/start` but drops incoming
-webhooks, and says so in the log.
+Until `ADMIN_CHAT_ID` is set the bot answers `/start` and `/help` and nothing
+else: it drops incoming webhooks and refuses every other command, since there is
+nobody to authorize against yet. The startup log carries the Seerr connection
+verdict in the meantime, so `docker logs` is how you check it at this stage.
 
-> To approve from a **group** instead, add the bot to the group, send `/start`
-> there, and use that (negative) ID. Disable privacy mode in BotFather first, or
-> the bot will not see the command.
+> **Use a private chat.** A group's chat ID is shared by everyone in it, so it
+> cannot identify an approver on its own. If you do point `ADMIN_CHAT_ID` at a
+> group, you must also set `APPROVER_USER_IDS` to the Telegram user IDs allowed
+> to decide; until you do, the bot refuses every button press rather than
+> trusting group membership. In a private chat the ID *is* your user ID, so
+> nothing extra is needed.
 
 ### 4. Point Seerr at the bot
 
@@ -71,11 +76,18 @@ In Seerr → **Settings → Notifications → Webhook**:
 | Webhook URL | `http://<bot-host>:8420/webhook` |
 | Authorization Header | same string as `WEBHOOK_AUTH_TOKEN`, or blank |
 | JSON Payload | **leave the default** |
-| Notification Types | **Request Pending Approval** only |
+| Notification Types | **Request Pending Approval**, **Request Approved**, **Request Declined** |
 
 The bot parses Seerr's stock payload, so there is no JSON to edit. If you have
 customized it, make sure it still contains `notification_type`, `subject`,
 `image`, and the `{{request}}` block with `request_id`.
+
+Pending Approval is the one that actually sends you a card. Approved and
+Declined are what let the bot notice a decision you made in the **web UI**: it
+rewrites the matching Telegram card to "Approved" and strips its buttons,
+instead of leaving a stale one you might tap later. Deciding from Telegram makes
+Seerr echo the same events back, and the bot recognizes its own decisions and
+ignores the echo, so you get one card and one final state either way.
 
 Finally, switch **off** "Request Pending Approval" in Seerr's built-in Telegram
 agent, or you will get two messages for every request — theirs without buttons,
@@ -232,7 +244,8 @@ is needed: the bot polls Telegram, and only Seerr needs to reach port 8420.
 | `TELEGRAM_BOT_TOKEN` | yes | — | Token from @BotFather |
 | `SEERR_URL` | yes | — | Where the container reaches Seerr; a trailing `/api/v1` is stripped |
 | `SEERR_API_KEY` | yes | — | Seerr → Settings → General → API Key |
-| `ADMIN_CHAT_ID` | no | — | Chat that receives requests and may press buttons |
+| `ADMIN_CHAT_ID` | no | — | Private chat that receives requests and may press buttons |
+| `APPROVER_USER_IDS` | no | `ADMIN_CHAT_ID` | Comma-separated user IDs allowed to approve; required only when `ADMIN_CHAT_ID` is a group |
 | `SEERR_PUBLIC_URL` | no | `SEERR_URL` | Address used for "Open in Seerr" link buttons |
 | `WEBHOOK_AUTH_TOKEN` | no | — | If set, Seerr must send it as the `Authorization` header |
 | `PORT` | no | `8420` | Webhook listener port |
@@ -248,10 +261,14 @@ is needed: the bot polls Telegram, and only Seerr needs to reach port 8420.
 | Command | Who | Effect |
 | --- | --- | --- |
 | `/start`, `/id` | anyone | Replies with this chat's ID |
-| `/test` | admin | Read-only check of the Seerr connection |
-| `/status` | admin | Pending / approved / declined counts |
-| `/pending` | admin | Lists up to 10 open requests, each with buttons |
 | `/help` | anyone | Command list |
+| `/test` | approver | Read-only check of the Seerr connection |
+| `/status` | approver | Pending / approved / declined counts |
+| `/pending` | approver | Lists up to 10 open requests, each with buttons |
+
+"Approver" means the message came from the admin chat *and* from a user in
+`APPROVER_USER_IDS`. Both conditions are checked for commands and button
+presses alike. Before `ADMIN_CHAT_ID` is configured, only the first two work.
 
 `/pending` is the way to catch up on requests that arrived while the bot was
 down, since webhooks are not retried by Seerr.

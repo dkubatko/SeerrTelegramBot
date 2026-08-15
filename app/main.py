@@ -81,8 +81,22 @@ async def startup_checks(bot: SeerrTelegramBot, config: Config) -> None:
             "ADMIN_CHAT_ID is not set. Send /start to the bot to get your chat ID, "
             "set the variable, and restart. Requests are dropped until then."
         )
+        return
+
+    logger.info("Approvals will be sent to chat %s", config.admin_chat_id)
+    if not config.approver_user_ids:
+        logger.error(
+            "ADMIN_CHAT_ID %s is a group chat, so the approver cannot be "
+            "inferred from it. Set APPROVER_USER_IDS to the Telegram user IDs "
+            "allowed to approve, or every group member could. Button presses "
+            "are refused until then.",
+            config.admin_chat_id,
+        )
     else:
-        logger.info("Approvals will be sent to chat %s", config.admin_chat_id)
+        logger.info(
+            "Approvers: %s",
+            ", ".join(str(uid) for uid in sorted(config.approver_user_ids)),
+        )
 
 
 async def run() -> int:

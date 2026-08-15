@@ -26,6 +26,7 @@ def make_config(**overrides: Any) -> Config:
         seerr_public_url="http://seerr:5055",
         seerr_api_key="key",
         admin_chat_id=42,
+        approver_user_ids=frozenset({42}),
         webhook_auth_token=None,
         webhook_path="/webhook",
         port=8420,
@@ -35,6 +36,12 @@ def make_config(**overrides: Any) -> Config:
         request_timeout=15.0,
     )
     base.update(overrides)
+    if "approver_user_ids" not in overrides:
+        # Mirror how Config.from_env derives approvers from a private chat ID.
+        admin = base["admin_chat_id"]
+        base["approver_user_ids"] = (
+            frozenset({admin}) if isinstance(admin, int) and admin > 0 else frozenset()
+        )
     return Config(**base)  # type: ignore[arg-type]
 
 
@@ -107,7 +114,13 @@ def build_bot(**config_overrides: Any):
     return SeerrTelegramBot(config, telegram, seerr), telegram, seerr
 
 
-def callback(data: str, chat_id: int = 42, message_id: int = 101, photo: bool = False):
+def callback(
+    data: str,
+    chat_id: int = 42,
+    message_id: int = 101,
+    photo: bool = False,
+    user_id: int | None = None,
+):
     message: dict[str, Any] = {"message_id": message_id, "chat": {"id": chat_id}}
     if photo:
         message["photo"] = [{"file_id": "x"}]
@@ -118,7 +131,7 @@ def callback(data: str, chat_id: int = 42, message_id: int = 101, photo: bool = 
         "id": "cb1",
         "data": data,
         "message": message,
-        "from": {"id": 42, "username": "dan"},
+        "from": {"id": chat_id if user_id is None else user_id, "username": "dan"},
     }
 
 
@@ -268,6 +281,45 @@ class TestDecisions(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seerr.calls, [])
         self.assertIn("not authorized", telegram.answers[0]["text"])
 
+    async def test_group_member_cannot_approve(self):
+        """A group's chat ID is shared, so identity must come from the user."""
+        bot, telegram, seerr = build_bot(
+            admin_chat_id=-100500, approver_user_ids=frozenset({42})
+        )
+        await bot.handle_webhook(pending_payload(REQUESTS["1"]))
+
+        await bot.handle_update(
+            {"callback_query": callback("approve:1", chat_id=-100500, user_id=999)}
+        )
+
+        self.assertEqual(seerr.calls, [])
+        self.assertIn("not authorized", telegram.answers[0]["text"])
+
+    async def test_named_approver_can_approve_in_a_group(self):
+        bot, telegram, seerr = build_bot(
+            admin_chat_id=-100500, approver_user_ids=frozenset({42})
+        )
+        await bot.handle_webhook(pending_payload(REQUESTS["1"]))
+
+        await bot.handle_update(
+            {"callback_query": callback("approve:1", chat_id=-100500, user_id=42)}
+        )
+
+        self.assertEqual(seerr.calls, [("1", "approve")])
+
+    async def test_group_without_approvers_refuses_everyone(self):
+        bot, telegram, seerr = build_bot(
+            admin_chat_id=-100500, approver_user_ids=frozenset()
+        )
+        await bot.handle_webhook(pending_payload(REQUESTS["1"]))
+
+        await bot.handle_update(
+            {"callback_query": callback("approve:1", chat_id=-100500, user_id=42)}
+        )
+
+        self.assertEqual(seerr.calls, [])
+        self.assertIn("APPROVER_USER_IDS", telegram.answers[0]["text"])
+
     async def test_seerr_failure_surfaces_as_an_alert(self):
         bot, telegram, seerr = build_bot()
         await bot.handle_webhook(pending_payload(REQUESTS["1"]))
@@ -366,16 +418,28 @@ class TestCommands(unittest.IsolatedAsyncioTestCase):
             "approve:1",
         )
 
-    async def test_library_commands_wait_for_admin_chat_id(self):
-        bot, telegram, _ = build_bot(admin_chat_id=None)
-        await bot.handle_update(self._message("/pending", chat_id=999))
-        self.assertIn("ADMIN_CHAT_ID", telegram.sent[0]["text"])
-        self.assertEqual(len(telegram.sent), 1)
+    async def test_every_admin_command_waits_for_admin_chat_id(self):
+        """Pre-configuration there is nobody to authorize against, so /test
+        must not leak the Seerr address, version, or request counts."""
+        for command in ("/test", "/status", "/pending"):
+            bot, telegram, seerr = build_bot(admin_chat_id=None)
+            await bot.handle_update(self._message(command, chat_id=999))
 
-    async def test_test_command_is_available_during_bootstrap(self):
-        bot, telegram, _ = build_bot(admin_chat_id=None)
-        await bot.handle_update(self._message("/test", chat_id=999))
-        self.assertIn("Reachable", telegram.sent[0]["text"])
+            self.assertEqual(len(telegram.sent), 1, command)
+            body = telegram.sent[0]["text"]
+            self.assertIn("ADMIN_CHAT_ID", body, command)
+            self.assertNotIn("http://seerr:5055", body, command)
+            self.assertNotIn("2.1.0", body, command)
+
+    async def test_group_member_cannot_run_admin_commands(self):
+        bot, telegram, _ = build_bot(
+            admin_chat_id=-100500, approver_user_ids=frozenset({42})
+        )
+        message = self._message("/pending", chat_id=-100500)
+        message["message"]["from"] = {"id": 999, "username": "stranger"}
+
+        await bot.handle_update(message)
+        self.assertIn("admin chat", telegram.sent[0]["text"])
 
     async def test_non_command_text_is_ignored(self):
         bot, telegram, _ = build_bot()

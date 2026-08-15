@@ -14,13 +14,16 @@ services:
     container_name: seerr-bot-test
     restart: unless-stopped
     ports:
-      - "8420:8420"
+      # 8421 on the host, so this stack can run beside a real deployment
+      # that already holds 8420.
+      - "8421:8420"
     environment:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-demo-token}
       TELEGRAM_API_BASE: ${TELEGRAM_API_BASE-http://mock-telegram:9111}
       SEERR_URL: http://mock-seerr:5055
       SEERR_API_KEY: test-api-key
       ADMIN_CHAT_ID: ${ADMIN_CHAT_ID:-4242}
+      APPROVER_USER_IDS: ${APPROVER_USER_IDS:-}
       LOG_LEVEL: DEBUG
     depends_on:
       - mock-seerr
