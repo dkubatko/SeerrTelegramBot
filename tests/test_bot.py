@@ -1216,7 +1216,7 @@ class TestCommands(unittest.IsolatedAsyncioTestCase):
         await bot.handle_update(self._message("/synopsis off"))
 
         self.assertEqual(len(telegram.edits), 2, "the other two still redrew")
-        self.assertIn("Rewrote 2 of the last 3", telegram.sent[-1]["text"])
+        self.assertIn("Synopsis is now <b>hidden</b>", telegram.sent[-1]["text"])
 
     async def test_setting_it_to_what_it_already_is_redraws_nothing(self):
         bot, telegram, _ = build_bot()

@@ -544,16 +544,10 @@ class SeerrTelegramBot:
 
         async with self._lock:
             updated, seen = await self._rerender_recent()
+        logger.info("Redrew %d of the last %d cards", updated, seen)
 
         state = "shown" if wanted else "hidden"
-        note = (
-            f" Rewrote {updated} of the last {seen} cards."
-            if seen
-            else " No earlier cards to rewrite."
-        )
-        await self.telegram.send_message(
-            chat_id, f"Synopsis is now <b>{state}</b>.{note}"
-        )
+        await self.telegram.send_message(chat_id, f"Synopsis is now <b>{state}</b>.")
 
     async def _rerender_recent(self) -> tuple[int, int]:
         """Redraw recent cards in place, so the setting applies retroactively.

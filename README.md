@@ -297,8 +297,8 @@ is needed: the bot polls Telegram, and only Seerr needs to reach port 8420.
 `/synopsis` also redraws the last 25 cards in place, keeping each one's own
 buttons and state — an approved card still reads "Available in Plex" after the
 redraw. Editing is silent, so a cosmetic change does not ping anyone. Telegram
-will not edit messages older than 48 hours; those are skipped and counted in
-the reply. The setting is stored alongside the message index, so it survives
+will not edit messages older than 48 hours; those are skipped, and the count
+goes to the log rather than the reply. The setting is stored alongside the message index, so it survives
 restarts.
 
 "Admin" means the sender is `ADMIN_CHAT_ID`, in either the delivery chat or
