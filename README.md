@@ -91,7 +91,7 @@ In Seerr → **Settings → Notifications → Webhook**:
 | Webhook URL | `http://<bot-host>:8420/webhook` |
 | Authorization Header | same string as `WEBHOOK_AUTH_TOKEN`, or blank |
 | JSON Payload | **leave the default** |
-| Notification Types | **Request Pending Approval**, **Request Approved**, **Request Declined**, **Request Available** |
+| Notification Types | **Request Pending Approval**, **Request Approved**, **Request Declined**, **Request Automatically Approved**, **Request Available** |
 
 The bot parses Seerr's stock payload, so there is no JSON to edit. If you have
 customized it, make sure it still contains `notification_type`, `subject`,
@@ -106,8 +106,10 @@ made the request, on their own chat ID, which this bot never does.
 Pending Approval is the one that actually sends you a card. Approved and
 Declined are what let the bot notice a decision you made in the **web UI**: it
 replaces the matching Telegram card with the outcome, instead of leaving a
-stale one you might tap later. Available carries the card one step further,
-from "Waiting for download" to "Available in Plex". Deciding from Telegram makes
+stale one you might tap later. Automatically Approved posts a card for a
+request Seerr approved on its own — there is nothing to decide, so it arrives
+with no buttons and reads "Approved automatically". Available carries any of
+them one step further, from "Waiting for download" to "Available in Plex". Deciding from Telegram makes
 Seerr echo the same events back, and the bot recognizes its own decisions and
 ignores the echo, so you get one card and one final state either way.
 
@@ -275,6 +277,7 @@ is needed: the bot polls Telegram, and only Seerr needs to reach port 8420.
 | `LOG_LEVEL` | no | `INFO` | `DEBUG` logs every payload and update |
 | `FORWARD_OTHER_NOTIFICATIONS` | no | `false` | Relay notification types the bot has no card for (available, failed, issues) to the admin chat as plain text |
 | `NOTIFY_ON_START` | no | `false` | Send a short message to the admin chat on boot |
+| `STATE_FILE` | no | `/data/state.json` | Where the request-to-message index is kept; set to empty for memory only |
 | `SEERR_TIMEOUT` | no | `15` | Seconds before a Seerr call gives up |
 | `TELEGRAM_API_BASE` | no | `https://api.telegram.org` | For a self-hosted Bot API server or testing |
 
@@ -338,7 +341,18 @@ as a notification instead of a silent edit you might miss. Telegram refuses to
 delete messages older than 48 hours; past that the bot falls back to editing
 the original in place and stripping its buttons.
 
-The bot keeps its message index in memory only. After a restart the buttons on
-older messages still work — the request ID travels in the callback data — but
-the replacement will show a shorter title. Nothing is persisted, so the
-container can be recreated freely.
+### How a webhook finds its card
+
+When the bot posts a card it records the Telegram chat and message IDs against
+the Seerr **request ID**, along with the decision and who made it. Every later
+webhook — approved, declined, available — carries that same `request_id`, which
+is how the right card gets updated. The buttons need no lookup at all, since
+the request ID travels inside their callback data.
+
+That index lives in `STATE_FILE` (`/data/state.json` in the image), written
+after every change and reloaded at startup, so restarts and upgrades keep their
+card links. Both compose files mount a named volume at `/data`; without one the
+file lives in the container layer and survives restarts but not recreation. If
+the path is unwritable the bot logs a warning and runs from memory rather than
+refusing to start, and a corrupt file is discarded the same way. The index is
+capped at 200 requests, oldest dropped first.

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections import OrderedDict
 from typing import Any, Callable
 
 from .config import Config
@@ -25,11 +24,10 @@ from .seerr import (
     SeerrClient,
     SeerrError,
 )
+from .state import MessageStore, SentMessage
 from .telegram import TelegramClient, TelegramError, is_valid_button_url, keyboard
 
 logger = logging.getLogger(__name__)
-
-TRACKED_LIMIT = 200
 
 HELP_TEXT = (
     "<b>Seerr approvals</b>\n\n"
@@ -58,39 +56,6 @@ def _callback_rows_only(markup: dict[str, Any] | None) -> dict[str, Any] | None:
     return keyboard(rows) if rows else None
 
 
-class SentMessage:
-    """A card the bot posted, and the outcome it currently shows.
-
-    `decision` and `actor` are kept so a later progress update can rebuild the
-    same card without asking Seerr who decided it.
-    """
-
-    __slots__ = (
-        "chat_id",
-        "message_id",
-        "is_photo",
-        "notification",
-        "decision",
-        "actor",
-    )
-
-    def __init__(
-        self,
-        chat_id: int,
-        message_id: int,
-        is_photo: bool,
-        notification: RequestNotification,
-        decision: str | None = None,
-        actor: str | None = None,
-    ) -> None:
-        self.chat_id = chat_id
-        self.message_id = message_id
-        self.is_photo = is_photo
-        self.notification = notification
-        self.decision = decision
-        self.actor = actor
-
-
 class SeerrTelegramBot:
     def __init__(
         self, config: Config, telegram: TelegramClient, seerr: SeerrClient
@@ -98,21 +63,10 @@ class SeerrTelegramBot:
         self.config = config
         self.telegram = telegram
         self.seerr = seerr
-        self._sent: OrderedDict[str, SentMessage] = OrderedDict()
-        self._decided_here: OrderedDict[str, str] = OrderedDict()
+        self.store = MessageStore(config.state_file)
         self._lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ utils
-
-    def _remember(self, request_id: str, sent: SentMessage) -> None:
-        self._sent[request_id] = sent
-        while len(self._sent) > TRACKED_LIMIT:
-            self._sent.popitem(last=False)
-
-    def _mark_decided(self, request_id: str, decision: str) -> None:
-        self._decided_here[request_id] = decision
-        while len(self._decided_here) > TRACKED_LIMIT:
-            self._decided_here.popitem(last=False)
 
     def _action_keyboard(self, notification: RequestNotification) -> dict[str, Any]:
         rows: list[list[dict[str, Any]]] = [
@@ -176,7 +130,11 @@ class SeerrTelegramBot:
             )
             return 200, "ok"
 
-        if kind in {"MEDIA_APPROVED", "MEDIA_DECLINED", "MEDIA_AUTO_APPROVED"}:
+        if kind == "MEDIA_AUTO_APPROVED":
+            await self._announce_auto_approved(notification)
+            return 200, "ok"
+
+        if kind in {"MEDIA_APPROVED", "MEDIA_DECLINED"}:
             await self._reflect_external_decision(notification)
             return 200, "ok"
 
@@ -250,17 +208,17 @@ class SeerrTelegramBot:
             self._action_keyboard(notification),
         )
         if notification.request_id:
-            self._remember(str(notification.request_id), sent)
+            self.store.remember(str(notification.request_id), sent)
 
     async def _reflect_external_decision(
         self, notification: RequestNotification
     ) -> None:
         """Update a pending message that was resolved in the Seerr web UI."""
         request_id = str(notification.request_id or "")
-        sent = self._sent.get(request_id)
+        sent = self.store.get(request_id)
         if not sent:
             return
-        if self._decided_here.pop(request_id, None):
+        if self.store.pop_decided(request_id):
             return  # this webhook is an echo of our own button press
 
         decision = (
@@ -270,9 +228,36 @@ class SeerrTelegramBot:
             sent, decision, "the Seerr web UI", _status_for(decision)
         )
 
+    async def _announce_auto_approved(
+        self, notification: RequestNotification
+    ) -> None:
+        """Post a card for a request Seerr approved without asking.
+
+        There is nothing to decide, so the card carries no buttons; it exists
+        to say what happened and to track the download that follows.
+        """
+        request_id = str(notification.request_id or "")
+        existing = self.store.get(request_id) if request_id else None
+        if existing is not None:
+            await self._finalize_message(existing, "approve", None, STATUS_WAITING)
+            return
+
+        sent = await self._send_card(
+            self.config.target_chat_id,
+            notification,
+            lambda limit: notification.resolved_text(
+                "approve", None, limit, STATUS_WAITING
+            ),
+            self._link_only_keyboard(notification),
+        )
+        sent.decision = "approve"
+        sent.actor = None
+        if request_id:
+            self.store.remember(request_id, sent)
+
     async def _mark_available(self, notification: RequestNotification) -> None:
         """Promote an approved card from "waiting" to "available"."""
-        sent = self._sent.get(str(notification.request_id or ""))
+        sent = self.store.get(str(notification.request_id or ""))
         if sent is None:
             logger.debug(
                 "Nothing to update for available request %s", notification.request_id
@@ -282,14 +267,14 @@ class SeerrTelegramBot:
             return  # never approved through a card of ours
 
         await self._finalize_message(
-            sent, sent.decision, sent.actor or "Seerr", STATUS_AVAILABLE
+            sent, sent.decision, sent.actor, STATUS_AVAILABLE
         )
 
     async def _finalize_message(
         self,
         sent: SentMessage,
         decision: str,
-        actor: str,
+        actor: str | None,
         status: str | None = None,
     ) -> None:
         """Replace the card rather than editing it, so the outcome pings.
@@ -326,7 +311,7 @@ class SeerrTelegramBot:
         replacement.actor = actor
         request_id = sent.notification.request_id
         if request_id:
-            self._remember(str(request_id), replacement)
+            self.store.remember(str(request_id), replacement)
 
     # ---------------------------------------------------------------- updates
 
@@ -611,7 +596,7 @@ class SeerrTelegramBot:
         actor = actor_name(callback.get("from") or {})
         is_photo = "photo" in message
 
-        sent = self._sent.get(request_id)
+        sent = self.store.get(request_id)
         if sent is None:
             # Message predates a restart: rebuild enough context to edit it.
             sent = SentMessage(
@@ -649,7 +634,7 @@ class SeerrTelegramBot:
             await self.telegram.answer_callback(callback_id, str(exc)[:190], alert=True)
             return
 
-        self._mark_decided(request_id, decision)
+        self.store.mark_decided(request_id, decision)
         logger.info("Request %s %sd by %s", request_id, decision, actor)
         await self.telegram.answer_callback(
             callback_id, "Approved ✅" if decision == "approve" else "Denied 🚫"

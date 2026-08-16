@@ -69,6 +69,7 @@ class Config:
     log_level: str
     forward_other_notifications: bool
     notify_on_start: bool
+    state_file: str | None
     request_timeout: float
 
     @property
@@ -119,5 +120,7 @@ class Config:
             log_level=(_clean("LOG_LEVEL") or "INFO").upper(),
             forward_other_notifications=_bool("FORWARD_OTHER_NOTIFICATIONS"),
             notify_on_start=_bool("NOTIFY_ON_START"),
+            # Set STATE_FILE to "" to keep the message index in memory only.
+            state_file=os.environ.get("STATE_FILE", "state.json").strip() or None,
             request_timeout=float(_clean("SEERR_TIMEOUT") or 15.0),
         )

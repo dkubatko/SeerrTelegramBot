@@ -28,6 +28,9 @@ services:
       ADMIN_CHAT_ID: ${ADMIN_CHAT_ID:-4242}
       GROUP_CHAT_ID: ${GROUP_CHAT_ID:-}
       LOG_LEVEL: DEBUG
+      STATE_FILE: ${STATE_FILE:-/data/state.json}
+    volumes:
+      - seerr-bot-test-state:/data
     # Only Seerr is a startup dependency; the bot retries Telegram on its own,
     # so the mock can be left out entirely when using the real API.
     depends_on:
@@ -59,3 +62,6 @@ services:
     volumes:
       - ./scripts:/app/scripts:ro
     command: python scripts/mock_telegram.py --port 9111
+
+volumes:
+  seerr-bot-test-state:

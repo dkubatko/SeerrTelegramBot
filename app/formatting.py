@@ -77,10 +77,12 @@ class RequestNotification:
         return self._compose(limit)
 
     def resolved_text(
-        self, decision: str, actor: str, limit: int, status: str | None = None
+        self, decision: str, actor: str | None, limit: int, status: str | None = None
     ) -> str:
+        """`actor` of None means Seerr approved it on its own."""
         verdict = DECISIONS.get(decision, "Updated")
-        return self._compose(limit, f"{verdict} by <b>{esc(actor)}</b>", status)
+        line = f"{verdict} by <b>{esc(actor)}</b>" if actor else f"{verdict} automatically"
+        return self._compose(limit, line, status)
 
     def _compose(
         self, limit: int, decision: str | None = None, status: str | None = None

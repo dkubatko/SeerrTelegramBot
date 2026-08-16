@@ -77,6 +77,7 @@ class EndToEndTest(unittest.IsolatedAsyncioTestCase):
             log_level="CRITICAL",
             forward_other_notifications=False,
             notify_on_start=False,
+            state_file=None,
             request_timeout=10.0,
         )
 

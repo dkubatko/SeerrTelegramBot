@@ -6,6 +6,8 @@ services:
     restart: unless-stopped
     ports:
       - "8420:8420"
+    volumes:
+      - seerr-bot-state:/data
     environment:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       SEERR_URL: ${SEERR_URL}
@@ -15,5 +17,9 @@ services:
       SEERR_PUBLIC_URL: ${SEERR_PUBLIC_URL:-}
       WEBHOOK_AUTH_TOKEN: ${WEBHOOK_AUTH_TOKEN:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      STATE_FILE: ${STATE_FILE:-/data/state.json}
       FORWARD_OTHER_NOTIFICATIONS: ${FORWARD_OTHER_NOTIFICATIONS:-false}
       NOTIFY_ON_START: ${NOTIFY_ON_START:-false}
+
+volumes:
+  seerr-bot-state:

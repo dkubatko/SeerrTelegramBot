@@ -2,7 +2,8 @@ FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PORT=8420
+    PORT=8420 \
+    STATE_FILE=/data/state.json
 
 WORKDIR /app
 
@@ -11,7 +12,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ ./app/
 
-RUN useradd --create-home --uid 1000 seerrbot
+RUN useradd --create-home --uid 1000 seerrbot \
+    && mkdir -p /data \
+    && chown seerrbot /data
 USER seerrbot
 
 EXPOSE 8420

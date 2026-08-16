@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
@@ -18,6 +20,7 @@ from app.config import Config, normalize_seerr_url  # noqa: E402
 from app.formatting import CAPTION_LIMIT, RequestNotification  # noqa: E402
 from app.telegram import is_valid_button_url  # noqa: E402
 from app.seerr import SeerrError  # noqa: E402
+from app.state import MessageStore, SentMessage  # noqa: E402
 from mock_seerr import REQUESTS, TEST_PAYLOAD, pending_payload  # noqa: E402
 
 
@@ -37,6 +40,7 @@ def make_config(**overrides: Any) -> Config:
         log_level="INFO",
         forward_other_notifications=False,
         notify_on_start=False,
+        state_file=None,  # tests stay in memory
         request_timeout=15.0,
     )
     base.update(overrides)
@@ -494,7 +498,7 @@ class TestDecisions(unittest.IsolatedAsyncioTestCase):
         await bot.handle_webhook(pending_payload(REQUESTS["1"]))
         await bot.handle_update({"callback_query": callback("approve:1")})
 
-        tracked = bot._sent["1"]
+        tracked = bot.store.get("1")
         self.assertEqual(tracked.message_id, telegram.sent[-1]["message_id"])
 
     async def test_deny_calls_seerr_with_decline(self):
@@ -679,6 +683,146 @@ class TestProgressStatus(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(telegram.sent[-1]["text"].endswith("⏳ Waiting for download"))
+
+
+class TestAutoApproval(unittest.IsolatedAsyncioTestCase):
+    """Seerr can approve without asking; the card says so and tracks it."""
+
+    def _payload(self, request_id: str = "1") -> dict[str, Any]:
+        return pending_payload(REQUESTS[request_id]) | {
+            "notification_type": "MEDIA_AUTO_APPROVED",
+            "event": "Movie Request Automatically Approved",
+        }
+
+    async def test_a_card_is_posted_with_no_decider(self):
+        bot, telegram, _ = build_bot()
+        status, _ = await bot.handle_webhook(self._payload())
+
+        self.assertEqual(status, 200)
+        card = telegram.sent[0]["text"]
+        self.assertIn("✅ Approved automatically", card)
+        self.assertNotIn("Approved by", card)
+        self.assertTrue(card.endswith("⏳ Waiting for download"))
+
+    async def test_the_card_carries_no_decision_buttons(self):
+        bot, telegram, _ = build_bot(seerr_public_url="http://192.168.1.10:5055")
+        await bot.handle_webhook(self._payload())
+
+        buttons = [
+            b for row in telegram.sent[0]["markup"]["inline_keyboard"] for b in row
+        ]
+        self.assertTrue(all("callback_data" not in b for b in buttons))
+
+    async def test_it_becomes_available_like_any_other(self):
+        bot, telegram, _ = build_bot()
+        await bot.handle_webhook(self._payload())
+
+        await bot.handle_webhook(
+            {"notification_type": "MEDIA_AVAILABLE", "request": {"request_id": "1"}}
+        )
+
+        card = telegram.sent[-1]["text"]
+        self.assertTrue(card.endswith("▶️ Available in Plex"))
+        self.assertIn("Approved automatically", card)
+
+    async def test_an_existing_card_is_replaced_not_duplicated(self):
+        bot, telegram, _ = build_bot()
+        await bot.handle_webhook(pending_payload(REQUESTS["1"]))
+        original = telegram.sent[0]
+
+        await bot.handle_webhook(self._payload())
+
+        self.assertEqual(telegram.deleted, [original["message_id"]])
+        self.assertEqual(len(telegram.sent), 2)
+        self.assertIn("Approved automatically", telegram.sent[-1]["text"])
+
+
+class TestStatePersistence(unittest.TestCase):
+    """The request-to-message link has to survive a restart."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = Path(self.dir) / "state.json"
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _sample(self) -> SentMessage:
+        return SentMessage(
+            chat_id=-100500,
+            message_id=777,
+            is_photo=True,
+            notification=RequestNotification(pending_payload(REQUESTS["3"])),
+            decision="approve",
+            actor="@dan",
+        )
+
+    def test_a_reopened_store_returns_what_was_written(self):
+        MessageStore(self.path).remember("3", self._sample())
+
+        restored = MessageStore(self.path).get("3")
+
+        self.assertIsNotNone(restored)
+        self.assertEqual(restored.chat_id, -100500)
+        self.assertEqual(restored.message_id, 777)
+        self.assertTrue(restored.is_photo)
+        self.assertEqual(restored.decision, "approve")
+        self.assertEqual(restored.actor, "@dan")
+        self.assertIn("Breaking Bad", restored.notification.subject)
+        self.assertIn("Requested Seasons", restored.notification.pending_text(1024))
+
+    def test_an_automatic_approval_survives_with_no_actor(self):
+        sent = self._sample()
+        sent.actor = None
+        MessageStore(self.path).remember("3", sent)
+
+        restored = MessageStore(self.path).get("3")
+        self.assertIsNone(restored.actor)
+        self.assertIn(
+            "Approved automatically",
+            restored.notification.resolved_text("approve", None, 1024),
+        )
+
+    def test_echo_suppression_survives_too(self):
+        MessageStore(self.path).mark_decided("3", "approve")
+
+        store = MessageStore(self.path)
+        self.assertEqual(store.pop_decided("3"), "approve")
+        self.assertIsNone(MessageStore(self.path).pop_decided("3"))
+
+    def test_the_oldest_entries_are_dropped(self):
+        store = MessageStore(self.path, limit=3)
+        for n in range(5):
+            store.remember(str(n), self._sample())
+
+        reopened = MessageStore(self.path, limit=3)
+        self.assertIsNone(reopened.get("0"))
+        self.assertIsNotNone(reopened.get("4"))
+
+    def test_corrupt_state_is_ignored_rather_than_fatal(self):
+        self.path.write_text("{ this is not json")
+
+        store = MessageStore(self.path)
+
+        self.assertIsNone(store.get("3"))
+        store.remember("3", self._sample())  # and it recovers
+        self.assertIsNotNone(MessageStore(self.path).get("3"))
+
+    def test_an_unwritable_path_degrades_to_memory(self):
+        store = MessageStore(Path(self.dir) / "nope" / "x" / "state.json")
+        blocked = Path(self.dir) / "nope"
+        blocked.write_text("I am a file, not a directory")
+
+        store.remember("3", self._sample())  # must not raise
+
+        self.assertIsNotNone(store.get("3"))
+
+    def test_no_path_means_no_file(self):
+        store = MessageStore(None)
+        store.remember("3", self._sample())
+
+        self.assertIsNotNone(store.get("3"))
+        self.assertEqual(list(Path(self.dir).iterdir()), [])
 
 
 class TestCommands(unittest.IsolatedAsyncioTestCase):

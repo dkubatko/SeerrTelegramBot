@@ -12,3 +12,7 @@ venv/
 *.swo
 *~
 .*.sw?
+
+# Runtime state: the request-to-message index.
+state.json
+data/
