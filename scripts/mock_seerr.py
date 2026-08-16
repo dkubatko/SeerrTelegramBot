@@ -9,6 +9,7 @@ webhooks at the bot the same way Seerr's notification agent would.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
 from typing import Any
@@ -134,7 +135,30 @@ async def set_status(request: web.Request) -> web.Response:
     decision = request.match_info["decision"]
     record["status"] = 2 if decision == "approve" else 3
     logger.info("request %s -> %s", record["id"], decision.upper())
+
+    # Real Seerr notifies its agents the moment a status changes, including
+    # the client that just made the change. Echoing it here keeps the race
+    # that behaviour creates reachable from the test harness.
+    settings = request.app[SETTINGS]
+    if settings.get("bot_url"):
+        payload = pending_payload(record) | {
+            "notification_type": "MEDIA_APPROVED"
+            if decision == "approve"
+            else "MEDIA_DECLINED",
+            "event": f"Request {decision}d",
+        }
+        asyncio.create_task(_post(settings, payload))
+
     return web.json_response(record)
+
+
+async def _post(settings: dict[str, Any], payload: dict[str, Any]) -> None:
+    headers = {"Authorization": settings["auth"]} if settings.get("auth") else {}
+    try:
+        async with aiohttp.ClientSession() as session:
+            await session.post(settings["bot_url"], json=payload, headers=headers)
+    except aiohttp.ClientError as exc:
+        logger.warning("echo webhook failed: %s", exc)
 
 
 async def media_details(request: web.Request) -> web.Response:

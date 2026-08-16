@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from typing import Any, Callable
 
@@ -125,26 +124,33 @@ class SeerrTelegramBot:
             )
             return 503, "ADMIN_CHAT_ID is not configured on the bot"
 
+        # Everything below rewrites a card. The same lock guards button
+        # presses, so a webhook and a tap cannot interleave on one request.
         if notification.is_pending_request:
-            await self.send_approval_request(
-                self.config.target_chat_id, notification
-            )
+            async with self._lock:
+                await self.send_approval_request(
+                    self.config.target_chat_id, notification
+                )
             return 200, "ok"
 
         if kind == "MEDIA_AUTO_APPROVED":
-            await self._announce_auto_approved(notification)
+            async with self._lock:
+                await self._announce_auto_approved(notification)
             return 200, "ok"
 
         if kind in {"MEDIA_APPROVED", "MEDIA_DECLINED"}:
-            await self._reflect_external_decision(notification)
+            async with self._lock:
+                await self._reflect_external_decision(notification)
             return 200, "ok"
 
         if kind == "MEDIA_AVAILABLE":
-            await self._update_status(notification, STATUS_AVAILABLE)
+            async with self._lock:
+                await self._update_status(notification, STATUS_AVAILABLE)
             return 200, "ok"
 
         if kind == "MEDIA_FAILED":
-            await self._update_status(notification, STATUS_FAILED)
+            async with self._lock:
+                await self._update_status(notification, STATUS_FAILED)
             return 200, "ok"
 
         if self.config.forward_other_notifications:
@@ -298,10 +304,11 @@ class SeerrTelegramBot:
         try:
             await self.telegram.delete_message(sent.chat_id, sent.message_id)
         except TelegramError as exc:
-            # Telegram refuses to delete messages older than 48 hours. Strip
-            # the buttons instead so the stale card cannot be tapped again.
+            # Telegram refuses to delete messages older than 48 hours, and a
+            # message already gone cannot be deleted twice. Either way, edit
+            # the original in place instead of posting a second card.
             logger.warning("Could not delete message %s: %s", sent.message_id, exc)
-            with contextlib.suppress(TelegramError):
+            try:
                 await self.telegram.edit_text(
                     sent.chat_id,
                     sent.message_id,
@@ -309,7 +316,11 @@ class SeerrTelegramBot:
                     is_caption=sent.is_photo,
                     reply_markup=None,
                 )
-                return
+            except TelegramError as edit_exc:
+                logger.warning(
+                    "Could not edit message %s either: %s", sent.message_id, edit_exc
+                )
+            return
 
         replacement = await self._send_card(
             sent.chat_id,
@@ -637,14 +648,19 @@ class SeerrTelegramBot:
             )
             return
 
+        # Claim the decision before asking Seerr, not after: Seerr fires its
+        # own webhook the moment the status changes, and that echo can reach
+        # us before this call even returns. Unclaimed, it would be mistaken
+        # for someone deciding in the web UI and post a second card.
+        self.store.mark_decided(request_id, decision)
         try:
             await self.seerr.set_request_status(request_id, decision)
         except SeerrError as exc:
+            self.store.pop_decided(request_id)  # nothing happened after all
             logger.error("Failed to %s request %s: %s", decision, request_id, exc)
             await self.telegram.answer_callback(callback_id, str(exc)[:190], alert=True)
             return
 
-        self.store.mark_decided(request_id, decision)
         logger.info("Request %s %sd by %s", request_id, decision, actor)
         await self.telegram.answer_callback(
             callback_id, "Approved ✅" if decision == "approve" else "Denied 🚫"

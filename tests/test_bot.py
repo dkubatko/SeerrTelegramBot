@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from app.bot import SeerrTelegramBot  # noqa: E402
 from app.config import Config, normalize_seerr_url  # noqa: E402
 from app.formatting import CAPTION_LIMIT, RequestNotification  # noqa: E402
-from app.telegram import is_valid_button_url  # noqa: E402
+from app.telegram import TelegramError, is_valid_button_url  # noqa: E402
 from app.seerr import SeerrError  # noqa: E402
 from app.state import MessageStore, SentMessage  # noqa: E402
 from mock_seerr import REQUESTS, TEST_PAYLOAD, pending_payload  # noqa: E402
@@ -556,6 +556,84 @@ class TestDecisions(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seerr.calls, [])
         self.assertEqual(len(telegram.answers), 3)
         self.assertTrue(all(a["alert"] for a in telegram.answers))
+
+    async def _decide_while_seerr_echoes(self, decision: str, echo_type: str):
+        """Seerr fires its webhook the instant the status changes.
+
+        The echo lands on the HTTP server while the button press is still
+        being handled, which is exactly when a second card used to appear.
+        """
+        bot, telegram, seerr = build_bot()
+        await bot.handle_webhook(pending_payload(REQUESTS["1"]))
+
+        echoes: list[asyncio.Task] = []
+        original = seerr.set_request_status
+
+        async def set_and_echo(request_id, dec):
+            result = await original(request_id, dec)
+            echoes.append(
+                asyncio.create_task(
+                    bot.handle_webhook(
+                        {
+                            "notification_type": echo_type,
+                            "request": {"request_id": str(request_id)},
+                        }
+                    )
+                )
+            )
+            await asyncio.sleep(0)  # let the echo reach the lock and wait
+            return result
+
+        seerr.set_request_status = set_and_echo
+        await bot.handle_update({"callback_query": callback(f"{decision}:1")})
+        await asyncio.gather(*echoes)
+        return telegram
+
+    async def test_seerr_echo_during_approval_does_not_duplicate(self):
+        telegram = await self._decide_while_seerr_echoes("approve", "MEDIA_APPROVED")
+
+        resolved = [m for m in telegram.sent if "Approved" in m["text"]]
+        self.assertEqual(len(resolved), 1, "the echo must not post a second card")
+        self.assertIn("Approved by <b>@dan</b>", resolved[0]["text"])
+        self.assertNotIn("web UI", resolved[0]["text"])
+
+    async def test_seerr_echo_during_denial_does_not_duplicate(self):
+        telegram = await self._decide_while_seerr_echoes("decline", "MEDIA_DECLINED")
+
+        resolved = [m for m in telegram.sent if "Denied" in m["text"]]
+        self.assertEqual(len(resolved), 1)
+        self.assertIn("Denied by <b>@dan</b>", resolved[0]["text"])
+
+    async def test_a_failed_call_releases_the_claim(self):
+        """A decision that never happened must not swallow a later web-UI one."""
+        bot, telegram, seerr = build_bot()
+        await bot.handle_webhook(pending_payload(REQUESTS["1"]))
+        seerr.fail_with = SeerrError("Seerr rejected the API key (403).", 403)
+
+        await bot.handle_update({"callback_query": callback("approve:1")})
+        seerr.fail_with = None
+
+        await bot.handle_webhook(
+            {"notification_type": "MEDIA_APPROVED", "request": {"request_id": "1"}}
+        )
+
+        self.assertIn("Approved by <b>the Seerr web UI</b>", telegram.sent[-1]["text"])
+
+    async def test_a_vanished_message_is_not_replaced_twice(self):
+        """If the card is already gone, editing fails too - post nothing new."""
+        bot, telegram, _ = build_bot()
+        await bot.handle_webhook(pending_payload(REQUESTS["1"]))
+        before = len(telegram.sent)
+
+        async def gone(*_args, **_kwargs):
+            raise TelegramError("message to delete not found")
+
+        telegram.delete_message = gone
+        telegram.edit_text = gone
+
+        await bot.handle_update({"callback_query": callback("approve:1")})
+
+        self.assertEqual(len(telegram.sent), before, "no duplicate card")
 
     async def test_press_from_another_user_in_the_chat_is_rejected(self):
         """Identity comes from the sender, never from the chat alone."""
