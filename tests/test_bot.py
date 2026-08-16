@@ -82,7 +82,14 @@ class FakeTelegram:
         return {"message_id": self._next_id}
 
     async def edit_text(self, chat_id, message_id, text, *, is_caption, reply_markup=None):
-        self.edits.append({"message_id": message_id, "text": text, "caption": is_caption})
+        self.edits.append(
+            {
+                "message_id": message_id,
+                "text": text,
+                "caption": is_caption,
+                "markup": reply_markup,
+            }
+        )
         return {}
 
     async def delete_message(self, chat_id, message_id):
@@ -1115,15 +1122,15 @@ class TestCommands(unittest.IsolatedAsyncioTestCase):
         status, _ = await bot.handle_webhook(pending_payload(REQUESTS["1"]))
         self.assertEqual(status, 503)
 
-    async def test_description_reports_its_current_state(self):
+    async def test_synopsis_reports_its_current_state(self):
         bot, telegram, _ = build_bot()
-        await bot.handle_update(self._message("/description"))
+        await bot.handle_update(self._message("/synopsis"))
 
         self.assertIn("Synopsis is <b>on</b>", telegram.sent[0]["text"])
 
-    async def test_description_off_hides_the_synopsis_on_new_cards(self):
+    async def test_synopsis_off_hides_it_on_new_cards(self):
         bot, telegram, _ = build_bot()
-        await bot.handle_update(self._message("/description off"))
+        await bot.handle_update(self._message("/synopsis off"))
         await bot.handle_webhook(pending_payload(REQUESTS["3"]))
 
         card = telegram.sent[-1]["text"]
@@ -1131,10 +1138,10 @@ class TestCommands(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Breaking Bad", card)
         self.assertIn("Requested Seasons", card)
 
-    async def test_description_on_restores_it(self):
+    async def test_synopsis_on_restores_it(self):
         bot, telegram, _ = build_bot()
-        await bot.handle_update(self._message("/description off"))
-        await bot.handle_update(self._message("/description ON"))
+        await bot.handle_update(self._message("/synopsis off"))
+        await bot.handle_update(self._message("/synopsis ON"))
         await bot.handle_webhook(pending_payload(REQUESTS["3"]))
 
         self.assertIn("Walter White", telegram.sent[-1]["text"])
@@ -1142,25 +1149,96 @@ class TestCommands(unittest.IsolatedAsyncioTestCase):
     async def test_the_setting_also_applies_to_resolved_cards(self):
         bot, telegram, _ = build_bot()
         await bot.handle_webhook(pending_payload(REQUESTS["3"]))
-        await bot.handle_update(self._message("/description off"))
+        await bot.handle_update(self._message("/synopsis off"))
         await bot.handle_update({"callback_query": callback("approve:3")})
 
         card = telegram.sent[-1]["text"]
         self.assertNotIn("Walter White", card)
         self.assertIn("Approved by <b>@dan</b>", card)
 
+    async def test_existing_cards_are_redrawn_in_place(self):
+        bot, telegram, _ = build_bot()
+        await bot.handle_webhook(pending_payload(REQUESTS["3"]))
+        card = telegram.sent[-1]
+        sent_before = len(telegram.sent)
+
+        await bot.handle_update(self._message("/synopsis off"))
+
+        redraw = telegram.edits[0]
+        self.assertEqual(redraw["message_id"], card["message_id"])
+        self.assertNotIn("Walter White", redraw["text"])
+        self.assertIn("Requested Seasons", redraw["text"])
+        self.assertEqual(
+            len(telegram.sent), sent_before + 1, "only the confirmation is posted"
+        )
+
+    async def test_redrawing_keeps_the_decision_buttons(self):
+        bot, telegram, _ = build_bot(seerr_public_url="http://192.168.1.10:5055")
+        await bot.handle_webhook(pending_payload(REQUESTS["3"]))
+
+        await bot.handle_update(self._message("/synopsis off"))
+
+        rows = telegram.edits[0]["markup"]["inline_keyboard"]
+        self.assertEqual(
+            [b["callback_data"] for b in rows[0]], ["approve:3", "decline:3"]
+        )
+
+    async def test_redrawing_preserves_each_card_state(self):
+        """A redraw must not reset an available card to waiting."""
+        bot, telegram, _ = build_bot()
+        await bot.handle_webhook(pending_payload(REQUESTS["1"]))
+        await bot.handle_update({"callback_query": callback("approve:1")})
+        await bot.handle_webhook(
+            {"notification_type": "MEDIA_AVAILABLE", "request": {"request_id": "1"}}
+        )
+
+        await bot.handle_update(self._message("/synopsis off"))
+
+        redraw = telegram.edits[-1]
+        self.assertIn("Approved by <b>@dan</b>", redraw["text"])
+        self.assertTrue(redraw["text"].endswith("▶️ Available in Plex"))
+
+    async def test_a_redraw_that_fails_does_not_stop_the_rest(self):
+        bot, telegram, _ = build_bot()
+        for request_id in ("1", "2", "3"):
+            await bot.handle_webhook(pending_payload(REQUESTS[request_id]))
+
+        calls = {"n": 0}
+        real_edit = telegram.edit_text
+
+        async def flaky(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise TelegramError("message to edit not found")
+            return await real_edit(*args, **kwargs)
+
+        telegram.edit_text = flaky
+        await bot.handle_update(self._message("/synopsis off"))
+
+        self.assertEqual(len(telegram.edits), 2, "the other two still redrew")
+        self.assertIn("Rewrote 2 of the last 3", telegram.sent[-1]["text"])
+
+    async def test_setting_it_to_what_it_already_is_redraws_nothing(self):
+        bot, telegram, _ = build_bot()
+        await bot.handle_webhook(pending_payload(REQUESTS["3"]))
+
+        await bot.handle_update(self._message("/synopsis on"))
+
+        self.assertEqual(telegram.edits, [])
+        self.assertIn("already <b>on</b>", telegram.sent[-1]["text"])
+
     async def test_a_bad_argument_explains_itself(self):
         bot, telegram, _ = build_bot()
-        await bot.handle_update(self._message("/description maybe"))
+        await bot.handle_update(self._message("/synopsis maybe"))
 
-        self.assertIn("/description on", telegram.sent[0]["text"])
-        self.assertTrue(bot._with_description, "an unclear argument changes nothing")
+        self.assertIn("/synopsis on", telegram.sent[0]["text"])
+        self.assertTrue(bot._with_synopsis, "an unclear argument changes nothing")
 
     async def test_non_admins_cannot_change_it(self):
         bot, telegram, _ = build_bot()
-        await bot.handle_update(self._message("/description off", chat_id=999))
+        await bot.handle_update(self._message("/synopsis off", chat_id=999))
 
-        self.assertTrue(bot._with_description)
+        self.assertTrue(bot._with_synopsis)
         self.assertIn("configured admin", telegram.sent[0]["text"])
 
     async def test_non_command_text_is_ignored(self):

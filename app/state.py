@@ -25,9 +25,9 @@ TRACKED_LIMIT = 200
 class SentMessage:
     """A card the bot posted, and the outcome it currently shows.
 
-    `decision` and `actor` are kept so a later progress update can rebuild the
-    same card without asking Seerr who decided it. An actor of None means the
-    request was approved automatically, by nobody in particular.
+    `decision`, `actor` and `status` are kept so the card can be rebuilt
+    exactly as it stands, without asking Seerr who decided it or how far the
+    download got. An actor of None means Seerr approved it automatically.
     """
 
     __slots__ = (
@@ -37,6 +37,7 @@ class SentMessage:
         "notification",
         "decision",
         "actor",
+        "status",
     )
 
     def __init__(
@@ -47,6 +48,7 @@ class SentMessage:
         notification: RequestNotification,
         decision: str | None = None,
         actor: str | None = None,
+        status: str | None = None,
     ) -> None:
         self.chat_id = chat_id
         self.message_id = message_id
@@ -54,6 +56,7 @@ class SentMessage:
         self.notification = notification
         self.decision = decision
         self.actor = actor
+        self.status = status
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -62,6 +65,7 @@ class SentMessage:
             "is_photo": self.is_photo,
             "decision": self.decision,
             "actor": self.actor,
+            "status": self.status,
             "payload": self.notification.raw,
         }
 
@@ -74,6 +78,7 @@ class SentMessage:
             RequestNotification(data.get("payload") or {}),
             data.get("decision"),
             data.get("actor"),
+            data.get("status"),
         )
 
 

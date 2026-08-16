@@ -29,13 +29,17 @@ from .telegram import TelegramClient, TelegramError, is_valid_button_url, keyboa
 
 logger = logging.getLogger(__name__)
 
+# How many recent cards a setting change redraws. Telegram rate-limits bursts,
+# and older cards are past the point anyone rereads them.
+RERENDER_LIMIT = 25
+
 HELP_TEXT = (
     "<b>Seerr approvals</b>\n\n"
     "/start — show this chat's Telegram ID (use it for ADMIN_CHAT_ID)\n"
     "/test — check the connection to Seerr without creating anything\n"
     "/status — pending and approved request counts\n"
     "/pending — list open requests with Approve / Deny buttons\n"
-    "/description on|off — show or hide the synopsis on new cards\n"
+    "/synopsis on|off — show or hide the synopsis on cards\n"
     "/help — this message"
 )
 
@@ -70,8 +74,8 @@ class SeerrTelegramBot:
     # ------------------------------------------------------------------ utils
 
     @property
-    def _with_description(self) -> bool:
-        return bool(self.store.preferences.get("descriptions", True))
+    def _with_synopsis(self) -> bool:
+        return bool(self.store.preferences.get("synopsis", True))
 
     def _action_keyboard(self, notification: RequestNotification) -> dict[str, Any]:
         rows: list[list[dict[str, Any]]] = [
@@ -159,7 +163,7 @@ class SeerrTelegramBot:
             return 200, "ok"
 
         if self.config.forward_other_notifications:
-            text = notification.pending_text(MESSAGE_LIMIT, self._with_description)
+            text = notification.pending_text(MESSAGE_LIMIT, self._with_synopsis)
             header = f"<b>{esc(notification.event or kind)}</b>\n"
             await self.telegram.send_message(
                 self.config.target_chat_id, header + text, disable_preview=True
@@ -220,7 +224,7 @@ class SeerrTelegramBot:
         sent = await self._send_card(
             chat_id,
             notification,
-            lambda limit: notification.pending_text(limit, self._with_description),
+            lambda limit: notification.pending_text(limit, self._with_synopsis),
             self._action_keyboard(notification),
         )
         if notification.request_id:
@@ -272,12 +276,13 @@ class SeerrTelegramBot:
             self.config.target_chat_id,
             notification,
             lambda limit: notification.resolved_text(
-                "approve", None, limit, STATUS_WAITING, self._with_description
+                "approve", None, limit, STATUS_WAITING, self._with_synopsis
             ),
             self._link_only_keyboard(notification),
         )
         sent.decision = "approve"
         sent.actor = None
+        sent.status = STATUS_WAITING
         if request_id:
             self.store.remember(request_id, sent)
 
@@ -315,7 +320,7 @@ class SeerrTelegramBot:
         """
         def render(limit: int) -> str:
             return sent.notification.resolved_text(
-                decision, actor, limit, status, self._with_description
+                decision, actor, limit, status, self._with_synopsis
             )
 
         try:
@@ -347,6 +352,7 @@ class SeerrTelegramBot:
         )
         replacement.decision = decision
         replacement.actor = actor
+        replacement.status = status
         request_id = sent.notification.request_id
         if request_id:
             self.store.remember(str(request_id), replacement)
@@ -420,8 +426,8 @@ class SeerrTelegramBot:
             await self._cmd_status(chat_id)
         elif command == "pending":
             await self._cmd_pending(chat_id)
-        elif command == "description":
-            await self._cmd_description(chat_id, argument)
+        elif command == "synopsis":
+            await self._cmd_synopsis(chat_id, argument)
         else:
             await self.telegram.send_message(chat_id, HELP_TEXT)
 
@@ -516,24 +522,80 @@ class SeerrTelegramBot:
         )
         return healthy, "\n".join(lines)
 
-    async def _cmd_description(self, chat_id: int, argument: str) -> None:
-        if argument in ("on", "off"):
-            self.store.set_preference("descriptions", argument == "on")
-            state = "shown on" if argument == "on" else "hidden from"
+    async def _cmd_synopsis(self, chat_id: int, argument: str) -> None:
+        if argument not in ("on", "off"):
+            current = "on" if self._with_synopsis else "off"
             await self.telegram.send_message(
                 chat_id,
-                f"Synopsis is now <b>{state}</b> new cards. "
-                "Cards already sent are unchanged.",
+                f"Synopsis is <b>{current}</b>.\n"
+                "Use <code>/synopsis on</code> or <code>/synopsis off</code>.",
             )
-            logger.info("Descriptions turned %s", argument)
             return
 
-        current = "on" if self._with_description else "off"
-        await self.telegram.send_message(
-            chat_id,
-            f"Synopsis is <b>{current}</b>.\n"
-            "Use <code>/description on</code> or <code>/description off</code>.",
+        wanted = argument == "on"
+        if wanted == self._with_synopsis:
+            await self.telegram.send_message(
+                chat_id, f"Synopsis is already <b>{argument}</b>."
+            )
+            return
+
+        self.store.set_preference("synopsis", wanted)
+        logger.info("Synopsis turned %s", argument)
+
+        async with self._lock:
+            updated, seen = await self._rerender_recent()
+
+        state = "shown" if wanted else "hidden"
+        note = (
+            f" Rewrote {updated} of the last {seen} cards."
+            if seen
+            else " No earlier cards to rewrite."
         )
+        await self.telegram.send_message(
+            chat_id, f"Synopsis is now <b>{state}</b>.{note}"
+        )
+
+    async def _rerender_recent(self) -> tuple[int, int]:
+        """Redraw recent cards in place, so the setting applies retroactively.
+
+        Editing is silent, which is what a cosmetic change should be. Telegram
+        refuses edits on messages older than 48 hours and rate-limits bursts,
+        so this covers only the newest cards and skips whatever it cannot
+        touch.
+        """
+        recent = list(self.store.messages.values())[-RERENDER_LIMIT:]
+        updated = 0
+        for sent in reversed(recent):
+            if await self._rerender(sent):
+                updated += 1
+            await asyncio.sleep(0.05)  # stay clear of Telegram's rate limits
+        return updated, len(recent)
+
+    async def _rerender(self, sent: SentMessage) -> bool:
+        limit = CAPTION_LIMIT if sent.is_photo else MESSAGE_LIMIT
+        if sent.decision:
+            text = sent.notification.resolved_text(
+                sent.decision, sent.actor, limit, sent.status, self._with_synopsis
+            )
+            markup = self._link_only_keyboard(sent.notification)
+        else:
+            text = sent.notification.pending_text(limit, self._with_synopsis)
+            markup = self._action_keyboard(sent.notification)
+
+        try:
+            # An edit without reply_markup would strip the buttons, so the
+            # keyboard is always passed back in.
+            await self.telegram.edit_text(
+                sent.chat_id,
+                sent.message_id,
+                text,
+                is_caption=sent.is_photo,
+                reply_markup=markup,
+            )
+            return True
+        except TelegramError as exc:
+            logger.debug("Could not redraw message %s: %s", sent.message_id, exc)
+            return False
 
     async def _cmd_status(self, chat_id: int) -> None:
         try:
