@@ -26,6 +26,7 @@ services:
       SEERR_PUBLIC_URL: ${SEERR_PUBLIC_URL:-http://127.0.0.1:5055}
       SEERR_API_KEY: test-api-key
       ADMIN_CHAT_ID: ${ADMIN_CHAT_ID:-4242}
+      GROUP_CHAT_ID: ${GROUP_CHAT_ID:-}
       LOG_LEVEL: DEBUG
     # Only Seerr is a startup dependency; the bot retries Telegram on its own,
     # so the mock can be left out entirely when using the real API.

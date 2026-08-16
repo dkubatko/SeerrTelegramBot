@@ -118,6 +118,11 @@ class TelegramClient:
             **{field: text},
         )
 
+    async def delete_message(self, chat_id: int | str, message_id: int) -> Any:
+        return await self.call(
+            "deleteMessage", chat_id=chat_id, message_id=message_id
+        )
+
     async def answer_callback(
         self, callback_id: str, text: str | None = None, alert: bool = False
     ) -> Any:

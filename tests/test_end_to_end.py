@@ -69,6 +69,7 @@ class EndToEndTest(unittest.IsolatedAsyncioTestCase):
             seerr_public_url=self.seerr_url,
             seerr_api_key="test-api-key",
             admin_chat_id=ADMIN_CHAT,
+            group_chat_id=None,
             rejected_group_chat_id=None,
             webhook_auth_token=AUTH_TOKEN,
             webhook_path="/webhook",
@@ -149,13 +150,14 @@ class EndToEndTest(unittest.IsolatedAsyncioTestCase):
         self.telegram_mock.push_callback(
             "approve:1", ADMIN_CHAT, message["message_id"], is_photo=True
         )
-        await self.telegram_mock.wait_for_edits(1)
+        await self.telegram_mock.wait_for_sent(2)
 
         self.assertEqual(await self.seerr_status_of("1"), 2)
-        edit = self.telegram_mock.edits[0]
-        self.assertIn("Approved", edit["text"])
-        self.assertIn("@tester", edit["text"])
-        self.assertTrue(edit["caption"])
+        self.assertIn(message["message_id"], self.telegram_mock.deleted)
+
+        replacement = self.telegram_mock.sent[-1]
+        self.assertIn("Approved by <b>@tester</b>", replacement["text"])
+        self.assertTrue(replacement["photo"], "the poster should survive")
         self.assertEqual(self.telegram_mock.answers[-1]["text"], "Approved ✅")
 
     async def test_pending_request_denied_from_telegram(self):
@@ -168,10 +170,11 @@ class EndToEndTest(unittest.IsolatedAsyncioTestCase):
         self.telegram_mock.push_callback(
             "decline:2", ADMIN_CHAT, message["message_id"], is_photo=True
         )
-        await self.telegram_mock.wait_for_edits(1)
+        await self.telegram_mock.wait_for_sent(2)
 
         self.assertEqual(await self.seerr_status_of("2"), 3)
-        self.assertIn("Denied", self.telegram_mock.edits[0]["text"])
+        self.assertIn(message["message_id"], self.telegram_mock.deleted)
+        self.assertIn("Denied by <b>@tester</b>", self.telegram_mock.sent[-1]["text"])
 
     async def test_webhook_rejects_a_bad_auth_header(self):
         async with self.session.post(

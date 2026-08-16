@@ -20,15 +20,18 @@ Works with Overseerr, Jellyseerr, and Seerr — they share the same API.
 
 - Sends pending requests to one Telegram chat, with poster, title, requester,
   requested seasons, and 4K flag.
-- Approves or declines in Seerr when you tap a button, then rewrites the message
-  to show the outcome and who decided it.
+- Approves or declines in Seerr when you tap a button, then replaces the card
+   with the outcome and who decided it, so the result arrives as a notification.
+- Follows the request onward: an approved card reads "Waiting for download",
+  and becomes "Available in Plex" once Seerr says the media has landed.
 - Notices when a request was already resolved in the web UI and says so instead
   of silently doing nothing.
 - `/start` replies with your Telegram chat ID, so you know what to put in
   `ADMIN_CHAT_ID` (and in Seerr's per-user Telegram settings).
 - `/test` verifies the Seerr connection without creating or changing anything.
 
-Only the admin chat can act on buttons. Anyone else gets a rejection toast.
+Only `ADMIN_CHAT_ID` can act on buttons, wherever the card was delivered.
+Anyone else gets a rejection toast.
 
 ## Setup
 
@@ -63,11 +66,20 @@ else: it drops incoming webhooks and refuses every other command, since there is
 nobody to authorize against yet. The startup log carries the Seerr connection
 verdict in the meantime, so `docker logs` is how you check it at this stage.
 
-> **Direct conversation only.** The bot works one-to-one with its admin, and
-> nowhere else. A group's ID identifies the room rather than a person, so it
-> cannot say who pressed a button; setting `ADMIN_CHAT_ID` to a group ID is
-> refused at startup and the bot behaves as if it were unconfigured. `/start`
-> in a group tells you to message the bot privately instead.
+> **`ADMIN_CHAT_ID` is a user, not a room.** It names the one person allowed to
+> approve, so a group ID there is refused at startup and the bot behaves as if
+> unconfigured. To deliver cards to a group, see below.
+
+### Delivering to a group
+
+Set `GROUP_CHAT_ID` and cards are posted to that group instead of your private
+chat. Everyone in the group sees them; only `ADMIN_CHAT_ID` can press the
+buttons, and anyone else gets "You are not authorized to decide this". Add the
+bot to the group, send `/start` there, and use the ID it replies with.
+
+Telegram hides ordinary group messages from bots by default, so disable privacy
+mode in @BotFather (`/setprivacy` → Disable) or the bot will not see `/start`.
+Buttons work either way, since callbacks are always delivered.
 
 ### 4. Point Seerr at the bot
 
@@ -79,7 +91,7 @@ In Seerr → **Settings → Notifications → Webhook**:
 | Webhook URL | `http://<bot-host>:8420/webhook` |
 | Authorization Header | same string as `WEBHOOK_AUTH_TOKEN`, or blank |
 | JSON Payload | **leave the default** |
-| Notification Types | **Request Pending Approval**, **Request Approved**, **Request Declined** |
+| Notification Types | **Request Pending Approval**, **Request Approved**, **Request Declined**, **Request Available** |
 
 The bot parses Seerr's stock payload, so there is no JSON to edit. If you have
 customized it, make sure it still contains `notification_type`, `subject`,
@@ -87,14 +99,15 @@ customized it, make sure it still contains `notification_type`, `subject`,
 
 Those three are the types the bot has purpose-built handling for. Anything else
 you tick here is dropped unless `FORWARD_OTHER_NOTIFICATIONS=true`, which
-relays it to the admin chat as plain text. Leave that off and let Seerr's own
+relays it to the delivery chat as plain text. Leave that off and let Seerr's own
 Telegram agent handle "now available" and issue events: it can notify whoever
 made the request, on their own chat ID, which this bot never does.
 
 Pending Approval is the one that actually sends you a card. Approved and
 Declined are what let the bot notice a decision you made in the **web UI**: it
-rewrites the matching Telegram card to "Approved" and strips its buttons,
-instead of leaving a stale one you might tap later. Deciding from Telegram makes
+replaces the matching Telegram card with the outcome, instead of leaving a
+stale one you might tap later. Available carries the card one step further,
+from "Waiting for download" to "Available in Plex". Deciding from Telegram makes
 Seerr echo the same events back, and the bot recognizes its own decisions and
 ignores the echo, so you get one card and one final state either way.
 
@@ -253,7 +266,8 @@ is needed: the bot polls Telegram, and only Seerr needs to reach port 8420.
 | `TELEGRAM_BOT_TOKEN` | yes | — | Token from @BotFather |
 | `SEERR_URL` | yes | — | Where the container reaches Seerr; a trailing `/api/v1` is stripped |
 | `SEERR_API_KEY` | yes | — | Seerr → Settings → General → API Key |
-| `ADMIN_CHAT_ID` | no | — | Your private chat ID; receives requests and may press buttons |
+| `ADMIN_CHAT_ID` | no | — | Your Telegram user ID; the only account that may approve or deny |
+| `GROUP_CHAT_ID` | no | `ADMIN_CHAT_ID` | Chat that receives the cards; a group can watch, but only `ADMIN_CHAT_ID` decides |
 | `SEERR_PUBLIC_URL` | no | `SEERR_URL` | Address used for "Open in Seerr" link buttons |
 | `WEBHOOK_AUTH_TOKEN` | no | — | If set, Seerr must send it as the `Authorization` header |
 | `PORT` | no | `8420` | Webhook listener port |
@@ -274,9 +288,10 @@ is needed: the bot polls Telegram, and only Seerr needs to reach port 8420.
 | `/status` | admin | Pending / approved / declined counts |
 | `/pending` | admin | Lists up to 10 open requests, each with buttons |
 
-"Admin" means both the chat and the sender are `ADMIN_CHAT_ID` — the direct
-conversation with you and nobody else. The same check guards commands and
-button presses. Before `ADMIN_CHAT_ID` is configured, only the first two work.
+"Admin" means the sender is `ADMIN_CHAT_ID`, in either the delivery chat or
+your private conversation with the bot. Authority comes from the user ID alone,
+never from the chat, which is why a group is safe to deliver to. Before
+`ADMIN_CHAT_ID` is configured, only the first two commands work.
 
 `/pending` is the way to catch up on requests that arrived while the bot was
 down, since webhooks are not retried by Seerr.
@@ -317,7 +332,13 @@ trademarks belonging to those projects.
 
 ## Notes on behaviour
 
+A decision replaces the card rather than editing it: the bot deletes the
+pending message and posts the outcome as a new one, so the resolution arrives
+as a notification instead of a silent edit you might miss. Telegram refuses to
+delete messages older than 48 hours; past that the bot falls back to editing
+the original in place and stripping its buttons.
+
 The bot keeps its message index in memory only. After a restart the buttons on
 older messages still work — the request ID travels in the callback data — but
-the edited confirmation will show a shorter title. Nothing is persisted, so the
+the replacement will show a shorter title. Nothing is persisted, so the
 container can be recreated freely.

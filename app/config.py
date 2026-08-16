@@ -61,6 +61,7 @@ class Config:
     seerr_public_url: str
     seerr_api_key: str
     admin_chat_id: int | None
+    group_chat_id: int | None
     rejected_group_chat_id: int | None
     webhook_auth_token: str | None
     webhook_path: str
@@ -69,6 +70,17 @@ class Config:
     forward_other_notifications: bool
     notify_on_start: bool
     request_timeout: float
+
+    @property
+    def target_chat_id(self) -> int | None:
+        """Where cards are delivered: the group if there is one, else the admin.
+
+        Delivery and authority are deliberately separate. Everyone in a group
+        can see a card; only ADMIN_CHAT_ID can act on it.
+        """
+        if self.admin_chat_id is None:
+            return None
+        return self.group_chat_id if self.group_chat_id is not None else self.admin_chat_id
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -79,10 +91,9 @@ class Config:
         seerr_url = normalize_seerr_url(_required("SEERR_URL"))
         public = _clean("SEERR_PUBLIC_URL")
 
-        # Only a direct conversation with the bot is supported. A private
-        # chat's ID is its user's ID, which is what makes the admin
-        # identifiable; group IDs are negative and identify nobody, so they are
-        # refused rather than accepted as a chat to take orders from.
+        # ADMIN_CHAT_ID identifies the person allowed to approve, so it has to
+        # be a user ID. A group ID names a room rather than a person and is
+        # refused here; GROUP_CHAT_ID is where a group belongs.
         admin_chat_id = _int("ADMIN_CHAT_ID")
         rejected_group_chat_id = None
         if admin_chat_id is not None and admin_chat_id <= 0:
@@ -100,6 +111,7 @@ class Config:
             seerr_public_url=normalize_seerr_url(public) if public else seerr_url,
             seerr_api_key=_required("SEERR_API_KEY"),
             admin_chat_id=admin_chat_id,
+            group_chat_id=_int("GROUP_CHAT_ID"),
             rejected_group_chat_id=rejected_group_chat_id,
             webhook_auth_token=_clean("WEBHOOK_AUTH_TOKEN"),
             webhook_path=path.rstrip("/") or "/webhook",

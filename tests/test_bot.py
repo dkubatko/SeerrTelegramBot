@@ -29,6 +29,7 @@ def make_config(**overrides: Any) -> Config:
         seerr_public_url="http://seerr:5055",
         seerr_api_key="key",
         admin_chat_id=42,
+        group_chat_id=None,
         rejected_group_chat_id=None,
         webhook_auth_token=None,
         webhook_path="/webhook",
@@ -47,25 +48,42 @@ class FakeTelegram:
         self.sent: list[dict[str, Any]] = []
         self.edits: list[dict[str, Any]] = []
         self.answers: list[dict[str, Any]] = []
+        self.deleted: list[int] = []
         self._next_id = 100
 
     async def send_message(self, chat_id, text, reply_markup=None, **_):
         self._next_id += 1
         self.sent.append(
-            {"chat_id": chat_id, "text": text, "markup": reply_markup, "photo": False}
+            {
+                "message_id": self._next_id,
+                "chat_id": chat_id,
+                "text": text,
+                "markup": reply_markup,
+                "photo": False,
+            }
         )
         return {"message_id": self._next_id}
 
     async def send_photo(self, chat_id, photo, caption, reply_markup=None):
         self._next_id += 1
         self.sent.append(
-            {"chat_id": chat_id, "text": caption, "markup": reply_markup, "photo": True}
+            {
+                "message_id": self._next_id,
+                "chat_id": chat_id,
+                "text": caption,
+                "markup": reply_markup,
+                "photo": True,
+            }
         )
         return {"message_id": self._next_id}
 
     async def edit_text(self, chat_id, message_id, text, *, is_caption, reply_markup=None):
         self.edits.append({"message_id": message_id, "text": text, "caption": is_caption})
         return {}
+
+    async def delete_message(self, chat_id, message_id):
+        self.deleted.append(message_id)
+        return True
 
     async def answer_callback(self, callback_id, text=None, alert=False):
         self.answers.append({"text": text, "alert": alert})
@@ -168,6 +186,97 @@ class TestConfigLoading(unittest.TestCase):
         config = self._load(None)
         self.assertIsNone(config.admin_chat_id)
         self.assertIsNone(config.rejected_group_chat_id)
+
+
+class TestDeliveryTarget(unittest.TestCase):
+    """Delivery and authority are separate: a group can watch, one user acts."""
+
+    def test_without_a_group_cards_go_to_the_admin(self):
+        self.assertEqual(make_config().target_chat_id, 42)
+
+    def test_a_group_takes_over_delivery_only(self):
+        config = make_config(group_chat_id=-100500)
+        self.assertEqual(config.target_chat_id, -100500)
+        self.assertEqual(config.admin_chat_id, 42)
+
+    def test_no_target_before_an_admin_is_configured(self):
+        config = make_config(admin_chat_id=None, group_chat_id=-100500)
+        self.assertIsNone(config.target_chat_id)
+
+    def test_group_chat_id_is_read_from_the_environment(self):
+        env = {
+            "TELEGRAM_BOT_TOKEN": "token",
+            "SEERR_URL": "http://seerr:5055",
+            "SEERR_API_KEY": "key",
+            "ADMIN_CHAT_ID": "42",
+            "GROUP_CHAT_ID": "-100500",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            config = Config.from_env()
+        self.assertEqual(config.group_chat_id, -100500)
+        self.assertEqual(config.target_chat_id, -100500)
+
+
+class TestGroupDelivery(unittest.IsolatedAsyncioTestCase):
+    GROUP = -100500
+
+    def _bot(self):
+        return build_bot(group_chat_id=self.GROUP)
+
+    async def test_cards_are_posted_to_the_group(self):
+        bot, telegram, _ = self._bot()
+        await bot.handle_webhook(pending_payload(REQUESTS["1"]))
+
+        self.assertEqual(telegram.sent[0]["chat_id"], self.GROUP)
+
+    async def test_the_admin_can_approve_from_inside_the_group(self):
+        bot, telegram, seerr = self._bot()
+        await bot.handle_webhook(pending_payload(REQUESTS["1"]))
+
+        await bot.handle_update(
+            {"callback_query": callback("approve:1", chat_id=self.GROUP, user_id=42)}
+        )
+
+        self.assertEqual(seerr.calls, [("1", "approve")])
+        self.assertEqual(telegram.sent[-1]["chat_id"], self.GROUP)
+
+    async def test_other_group_members_cannot_approve(self):
+        bot, telegram, seerr = self._bot()
+        await bot.handle_webhook(pending_payload(REQUESTS["1"]))
+
+        for member in (999, 1234, self.GROUP):
+            await bot.handle_update(
+                {
+                    "callback_query": callback(
+                        "approve:1", chat_id=self.GROUP, user_id=member
+                    )
+                }
+            )
+
+        self.assertEqual(seerr.calls, [])
+        self.assertTrue(all("not authorized" in a["text"] for a in telegram.answers))
+
+    async def test_the_admin_can_still_use_commands_in_their_dm(self):
+        bot, telegram, _ = self._bot()
+        await bot.handle_update(
+            {
+                "message": {
+                    "message_id": 1,
+                    "chat": {"id": 42, "type": "private"},
+                    "from": {"id": 42, "username": "dan"},
+                    "text": "/status",
+                }
+            }
+        )
+        self.assertIn("Pending", telegram.sent[0]["text"])
+
+    async def test_the_bot_stays_inert_in_an_unrelated_group(self):
+        bot, telegram, seerr = self._bot()
+        await bot.handle_update(
+            {"callback_query": callback("approve:1", chat_id=-999, user_id=42)}
+        )
+        self.assertEqual(seerr.calls, [])
+        self.assertIn("not authorized", telegram.answers[0]["text"])
 
 
 class TestButtonUrls(unittest.TestCase):
@@ -337,7 +446,7 @@ class TestWebhookRouting(unittest.IsolatedAsyncioTestCase):
     async def test_unrelated_types_are_ignored_by_default(self):
         bot, telegram, _ = build_bot()
         status, message = await bot.handle_webhook(
-            {"notification_type": "MEDIA_AVAILABLE", "subject": "Something"}
+            {"notification_type": "ISSUE_CREATED", "subject": "Something"}
         )
 
         self.assertEqual(status, 200)
@@ -347,21 +456,46 @@ class TestWebhookRouting(unittest.IsolatedAsyncioTestCase):
     async def test_forwarding_can_be_enabled(self):
         bot, telegram, _ = build_bot(forward_other_notifications=True)
         await bot.handle_webhook(
-            {"notification_type": "MEDIA_AVAILABLE", "subject": "Something", "event": "Now Available"}
+            {"notification_type": "ISSUE_CREATED", "subject": "Something", "event": "Issue Reported"}
         )
-        self.assertIn("Now Available", telegram.sent[0]["text"])
+        self.assertIn("Issue Reported", telegram.sent[0]["text"])
 
 
 class TestDecisions(unittest.IsolatedAsyncioTestCase):
-    async def test_approve_calls_seerr_and_edits_the_message(self):
+    async def test_approve_replaces_the_card_so_it_notifies(self):
         bot, telegram, seerr = build_bot()
         await bot.handle_webhook(pending_payload(REQUESTS["1"]))
+        original = telegram.sent[0]
+
         await bot.handle_update({"callback_query": callback("approve:1")})
 
         self.assertEqual(seerr.calls, [("1", "approve")])
-        self.assertIn("Approved", telegram.edits[0]["text"])
-        self.assertIn("@dan", telegram.edits[0]["text"])
+        self.assertEqual(telegram.deleted, [original["message_id"]])
+        self.assertEqual(telegram.edits, [], "a silent edit would not notify")
+
+        replacement = telegram.sent[-1]
+        self.assertIn("Approved by <b>@dan</b>", replacement["text"])
         self.assertEqual(telegram.answers[0]["text"], "Approved ✅")
+
+    async def test_replacement_card_drops_the_decision_buttons(self):
+        bot, telegram, _ = build_bot(seerr_public_url="http://192.168.1.10:5055")
+        await bot.handle_webhook(pending_payload(REQUESTS["1"]))
+        await bot.handle_update({"callback_query": callback("approve:1")})
+
+        buttons = [
+            b
+            for row in telegram.sent[-1]["markup"]["inline_keyboard"]
+            for b in row
+        ]
+        self.assertTrue(all("callback_data" not in b for b in buttons))
+
+    async def test_replacement_is_tracked_for_later_updates(self):
+        bot, telegram, _ = build_bot()
+        await bot.handle_webhook(pending_payload(REQUESTS["1"]))
+        await bot.handle_update({"callback_query": callback("approve:1")})
+
+        tracked = bot._sent["1"]
+        self.assertEqual(tracked.message_id, telegram.sent[-1]["message_id"])
 
     async def test_deny_calls_seerr_with_decline(self):
         bot, telegram, seerr = build_bot()
@@ -369,15 +503,15 @@ class TestDecisions(unittest.IsolatedAsyncioTestCase):
         await bot.handle_update({"callback_query": callback("decline:1")})
 
         self.assertEqual(seerr.calls, [("1", "decline")])
-        self.assertIn("Denied", telegram.edits[0]["text"])
+        self.assertIn("Denied by <b>@dan</b>", telegram.sent[-1]["text"])
 
-    async def test_photo_messages_are_edited_as_captions(self):
+    async def test_replacement_keeps_the_poster(self):
         bot, telegram, _ = build_bot()
         await bot.handle_webhook(pending_payload(REQUESTS["1"]))
         self.assertTrue(telegram.sent[0]["photo"])
 
         await bot.handle_update({"callback_query": callback("approve:1", photo=True)})
-        self.assertTrue(telegram.edits[0]["caption"])
+        self.assertTrue(telegram.sent[-1]["photo"])
 
     async def test_already_resolved_request_is_not_re_decided(self):
         bot, telegram, seerr = build_bot()
@@ -389,6 +523,7 @@ class TestDecisions(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seerr.calls, [])
         self.assertIn("Already approved", telegram.answers[0]["text"])
         self.assertTrue(telegram.answers[0]["alert"])
+        self.assertIn("Approved", telegram.sent[-1]["text"])
 
     async def test_button_from_another_chat_is_rejected(self):
         bot, telegram, seerr = build_bot()
@@ -447,7 +582,7 @@ class TestDecisions(unittest.IsolatedAsyncioTestCase):
         await bot.handle_update({"callback_query": callback("approve:2")})
 
         self.assertEqual(seerr.calls, [("2", "approve")])
-        self.assertIn("Approved", telegram.edits[0]["text"])
+        self.assertIn("Approved", telegram.sent[-1]["text"])
 
     async def test_external_decision_updates_the_pending_message(self):
         bot, telegram, _ = build_bot()
@@ -457,20 +592,93 @@ class TestDecisions(unittest.IsolatedAsyncioTestCase):
             {"notification_type": "MEDIA_DECLINED", "request": {"request_id": "1"}}
         )
 
-        self.assertIn("Denied", telegram.edits[0]["text"])
-        self.assertIn("Seerr web UI", telegram.edits[0]["text"])
+        self.assertIn("Denied by <b>the Seerr web UI</b>", telegram.sent[-1]["text"])
+        self.assertEqual(len(telegram.deleted), 1)
 
     async def test_echo_of_our_own_decision_is_not_re_applied(self):
         bot, telegram, _ = build_bot()
         await bot.handle_webhook(pending_payload(REQUESTS["1"]))
         await bot.handle_update({"callback_query": callback("approve:1")})
-        edits_after_button = len(telegram.edits)
+        sent_after_button = len(telegram.sent)
 
         await bot.handle_webhook(
             {"notification_type": "MEDIA_APPROVED", "request": {"request_id": "1"}}
         )
 
-        self.assertEqual(len(telegram.edits), edits_after_button)
+        self.assertEqual(len(telegram.sent), sent_after_button)
+
+
+class TestProgressStatus(unittest.IsolatedAsyncioTestCase):
+    """A card tracks the request onward: approved, then downloaded."""
+
+    async def _approve(self):
+        bot, telegram, seerr = build_bot()
+        await bot.handle_webhook(pending_payload(REQUESTS["1"]))
+        await bot.handle_update({"callback_query": callback("approve:1")})
+        return bot, telegram, seerr
+
+    async def test_approval_says_it_is_waiting(self):
+        _, telegram, _ = await self._approve()
+        card = telegram.sent[-1]["text"]
+
+        self.assertTrue(card.endswith("⏳ Waiting for download"))
+        self.assertIn("Approved by <b>@dan</b>\n\n⏳", card)
+
+    async def test_denial_has_nothing_to_wait_for(self):
+        bot, telegram, _ = build_bot()
+        await bot.handle_webhook(pending_payload(REQUESTS["1"]))
+        await bot.handle_update({"callback_query": callback("decline:1")})
+
+        self.assertNotIn("Waiting for download", telegram.sent[-1]["text"])
+
+    async def test_availability_promotes_the_card(self):
+        bot, telegram, _ = await self._approve()
+        before = len(telegram.sent)
+
+        await bot.handle_webhook(
+            {
+                "notification_type": "MEDIA_AVAILABLE",
+                "request": {"request_id": "1"},
+            }
+        )
+
+        self.assertEqual(len(telegram.sent), before + 1, "should re-send, not edit")
+        self.assertEqual(telegram.edits, [])
+        card = telegram.sent[-1]["text"]
+        self.assertTrue(card.endswith("▶️ Available in Plex"))
+        self.assertNotIn("Waiting for download", card)
+        self.assertIn("Approved by <b>@dan</b>", card, "the decider is preserved")
+
+    async def test_availability_for_an_untracked_request_is_ignored(self):
+        bot, telegram, _ = build_bot()
+        status, _ = await bot.handle_webhook(
+            {"notification_type": "MEDIA_AVAILABLE", "request": {"request_id": "77"}}
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(telegram.sent, [])
+
+    async def test_availability_does_not_resurrect_a_denied_card(self):
+        bot, telegram, _ = build_bot()
+        await bot.handle_webhook(pending_payload(REQUESTS["1"]))
+        await bot.handle_update({"callback_query": callback("decline:1")})
+        after_denial = len(telegram.sent)
+
+        await bot.handle_webhook(
+            {"notification_type": "MEDIA_AVAILABLE", "request": {"request_id": "1"}}
+        )
+
+        self.assertEqual(len(telegram.sent), after_denial)
+
+    async def test_web_ui_approval_also_starts_waiting(self):
+        bot, telegram, _ = build_bot()
+        await bot.handle_webhook(pending_payload(REQUESTS["1"]))
+
+        await bot.handle_webhook(
+            {"notification_type": "MEDIA_APPROVED", "request": {"request_id": "1"}}
+        )
+
+        self.assertTrue(telegram.sent[-1]["text"].endswith("⏳ Waiting for download"))
 
 
 class TestCommands(unittest.IsolatedAsyncioTestCase):
@@ -506,7 +714,7 @@ class TestCommands(unittest.IsolatedAsyncioTestCase):
     async def test_other_commands_are_refused_for_non_admins(self):
         bot, telegram, _ = build_bot()
         await bot.handle_update(self._message("/status", chat_id=999))
-        self.assertIn("direct conversation", telegram.sent[0]["text"])
+        self.assertIn("configured admin", telegram.sent[0]["text"])
 
     async def test_test_command_reports_both_directions(self):
         bot, telegram, _ = build_bot()
@@ -548,9 +756,9 @@ class TestCommands(unittest.IsolatedAsyncioTestCase):
         message["message"]["from"] = {"id": 999, "username": "stranger"}
 
         await bot.handle_update(message)
-        self.assertIn("direct conversation", telegram.sent[0]["text"])
+        self.assertIn("configured admin", telegram.sent[0]["text"])
 
-    async def test_start_in_a_group_refuses_and_gives_no_id(self):
+    async def test_start_in_a_group_offers_the_id_for_delivery(self):
         bot, telegram, _ = build_bot()
         message = self._message("/start", chat_id=-100500)
         message["message"]["chat"]["type"] = "supergroup"
@@ -558,8 +766,9 @@ class TestCommands(unittest.IsolatedAsyncioTestCase):
         await bot.handle_update(message)
 
         body = telegram.sent[0]["text"]
-        self.assertIn("direct conversation", body)
-        self.assertNotIn("-100500", body)
+        self.assertIn("<code>-100500</code>", body)
+        self.assertIn("GROUP_CHAT_ID", body)
+        self.assertIn("ADMIN_CHAT_ID", body)
 
     async def test_a_group_admin_chat_id_is_treated_as_unconfigured(self):
         config = make_config(admin_chat_id=None, rejected_group_chat_id=-100500)

@@ -218,6 +218,15 @@ async def trigger(request: web.Request) -> web.Response:
 
     if kind == "test":
         payload = TEST_PAYLOAD
+    elif kind == "available":
+        rid = request.query.get("id", "1")
+        record = REQUESTS.get(rid)
+        if not record:
+            return web.json_response({"error": f"no request {rid}"}, status=404)
+        payload = pending_payload(record) | {
+            "notification_type": "MEDIA_AVAILABLE",
+            "event": "Request Now Available",
+        }
     else:
         rid = request.query.get("id", "1")
         record = REQUESTS.get(rid)
@@ -267,6 +276,7 @@ def main() -> None:
     logger.info("API key is %r", API_KEY)
     logger.info("Fire a pending request:  curl -XPOST localhost:%s/trigger/pending?id=1", args.port)
     logger.info("Fire a test webhook:     curl -XPOST localhost:%s/trigger/test", args.port)
+    logger.info("Mark it available:       curl -XPOST localhost:%s/trigger/available?id=1", args.port)
     web.run_app(
         build_app(args.bot_url, args.auth),
         port=args.port,

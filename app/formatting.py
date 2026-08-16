@@ -14,6 +14,10 @@ DECISIONS = {
     "decline": "🚫 Denied",
 }
 
+# Progress after approval, shown as the card's last paragraph.
+STATUS_WAITING = "⏳ Waiting for download"
+STATUS_AVAILABLE = "▶️ Available in Plex"
+
 # Shortest description worth keeping; below this the line is just noise.
 MIN_DESCRIPTION = 40
 
@@ -72,11 +76,15 @@ class RequestNotification:
     def pending_text(self, limit: int) -> str:
         return self._compose(limit)
 
-    def resolved_text(self, decision: str, actor: str, limit: int) -> str:
+    def resolved_text(
+        self, decision: str, actor: str, limit: int, status: str | None = None
+    ) -> str:
         verdict = DECISIONS.get(decision, "Updated")
-        return self._compose(limit, f"{verdict} by <b>{esc(actor)}</b>")
+        return self._compose(limit, f"{verdict} by <b>{esc(actor)}</b>", status)
 
-    def _compose(self, limit: int, decision: str | None = None) -> str:
+    def _compose(
+        self, limit: int, decision: str | None = None, status: str | None = None
+    ) -> str:
         """Title and description, then request details, then who is involved.
 
         Each of those is its own paragraph, and empty ones disappear rather
@@ -95,7 +103,7 @@ class RequestNotification:
         if decision:
             people.append(decision)
 
-        paragraphs = [p for p in (details, "\n".join(people)) if p]
+        paragraphs = [p for p in (details, "\n".join(people), status) if p]
 
         # Whatever the fixed parts do not use is available to the description.
         spent = len(title) + sum(len(p) + 2 for p in paragraphs)

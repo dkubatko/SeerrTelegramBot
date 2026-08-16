@@ -93,15 +93,21 @@ async def startup_checks(bot: SeerrTelegramBot, config: Config) -> None:
 
     if config.rejected_group_chat_id is not None:
         logger.error(
-            "ADMIN_CHAT_ID %s is a group chat, which is not supported. "
-            "Send /start to the bot in a direct message and use the ID it "
-            "replies with. Requests are dropped until then.",
+            "ADMIN_CHAT_ID %s is a group chat, but it names the one user who "
+            "may approve. Put your own user ID there and the group in "
+            "GROUP_CHAT_ID. Requests are dropped until then.",
             config.rejected_group_chat_id,
         )
     elif config.admin_chat_id is None:
         logger.warning(
             "ADMIN_CHAT_ID is not set. Send /start to the bot to get your chat ID, "
             "set the variable, and restart. Requests are dropped until then."
+        )
+    elif config.group_chat_id is not None:
+        logger.info(
+            "Cards go to group %s; only user %s can approve them",
+            config.group_chat_id,
+            config.admin_chat_id,
         )
     else:
         logger.info("Approvals will be sent to chat %s", config.admin_chat_id)

@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections import OrderedDict
-from typing import Any
+from typing import Any, Callable
 
 from .config import Config
 from .formatting import (
     CAPTION_LIMIT,
     MESSAGE_LIMIT,
+    STATUS_AVAILABLE,
+    STATUS_WAITING,
     RequestNotification,
     actor_name,
     esc,
@@ -38,8 +41,38 @@ HELP_TEXT = (
 )
 
 
+def _status_for(decision: str) -> str | None:
+    """An approved request goes on to download; a denied one goes nowhere."""
+    return STATUS_WAITING if decision == "approve" else None
+
+
+def _callback_rows_only(markup: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Keep only rows whose buttons carry callback data, dropping URL rows."""
+    if not markup:
+        return None
+    rows = [
+        row
+        for row in markup["inline_keyboard"]
+        if all("callback_data" in button for button in row)
+    ]
+    return keyboard(rows) if rows else None
+
+
 class SentMessage:
-    __slots__ = ("chat_id", "message_id", "is_photo", "notification")
+    """A card the bot posted, and the outcome it currently shows.
+
+    `decision` and `actor` are kept so a later progress update can rebuild the
+    same card without asking Seerr who decided it.
+    """
+
+    __slots__ = (
+        "chat_id",
+        "message_id",
+        "is_photo",
+        "notification",
+        "decision",
+        "actor",
+    )
 
     def __init__(
         self,
@@ -47,11 +80,15 @@ class SentMessage:
         message_id: int,
         is_photo: bool,
         notification: RequestNotification,
+        decision: str | None = None,
+        actor: str | None = None,
     ) -> None:
         self.chat_id = chat_id
         self.message_id = message_id
         self.is_photo = is_photo
         self.notification = notification
+        self.decision = decision
+        self.actor = actor
 
 
 class SeerrTelegramBot:
@@ -134,18 +171,24 @@ class SeerrTelegramBot:
             return 503, "ADMIN_CHAT_ID is not configured on the bot"
 
         if notification.is_pending_request:
-            await self.send_approval_request(self.config.admin_chat_id, notification)
+            await self.send_approval_request(
+                self.config.target_chat_id, notification
+            )
             return 200, "ok"
 
         if kind in {"MEDIA_APPROVED", "MEDIA_DECLINED", "MEDIA_AUTO_APPROVED"}:
             await self._reflect_external_decision(notification)
             return 200, "ok"
 
+        if kind == "MEDIA_AVAILABLE":
+            await self._mark_available(notification)
+            return 200, "ok"
+
         if self.config.forward_other_notifications:
             text = notification.pending_text(MESSAGE_LIMIT)
             header = f"<b>{esc(notification.event or kind)}</b>\n"
             await self.telegram.send_message(
-                self.config.admin_chat_id, header + text, disable_preview=True
+                self.config.target_chat_id, header + text, disable_preview=True
             )
             return 200, "ok"
 
@@ -160,51 +203,54 @@ class SeerrTelegramBot:
                 "Send /start to the bot, then set ADMIN_CHAT_ID and restart."
             )
         await self.telegram.send_message(
-            self.config.admin_chat_id,
+            self.config.target_chat_id,
             "✅ <b>Webhook test received</b>\n"
             "Seerr can reach this bot. Pending requests will arrive here.",
         )
         return 200, "ok"
 
-    async def send_approval_request(
-        self, chat_id: int, notification: RequestNotification
-    ) -> None:
-        markup = self._action_keyboard(notification)
-        message: dict[str, Any] | None = None
-        is_photo = False
-
+    async def _send_card(
+        self,
+        chat_id: int,
+        notification: RequestNotification,
+        render: Callable[[int], str],
+        markup: dict[str, Any] | None,
+    ) -> SentMessage:
+        """Post a card as a poster where possible, as text otherwise."""
         if notification.image:
             try:
                 message = await self.telegram.send_photo(
-                    chat_id,
-                    notification.image,
-                    notification.pending_text(CAPTION_LIMIT),
-                    markup,
+                    chat_id, notification.image, render(CAPTION_LIMIT), markup
                 )
-                is_photo = True
+                return SentMessage(chat_id, message["message_id"], True, notification)
             except TelegramError as exc:
                 logger.warning("Poster send failed (%s); falling back to text", exc)
 
-        if message is None:
-            try:
-                message = await self.telegram.send_message(
-                    chat_id, notification.pending_text(MESSAGE_LIMIT), markup
-                )
-            except TelegramError as exc:
-                # Losing the card entirely would leave the request invisible.
-                # The decision buttons carry callback data and are always
-                # valid, so retry without whatever else Telegram objected to.
-                logger.warning("Card rejected (%s); retrying without the link", exc)
-                markup = keyboard([markup["inline_keyboard"][0]])
-                message = await self.telegram.send_message(
-                    chat_id, notification.pending_text(MESSAGE_LIMIT), markup
-                )
-
-        if notification.request_id:
-            self._remember(
-                str(notification.request_id),
-                SentMessage(chat_id, message["message_id"], is_photo, notification),
+        try:
+            message = await self.telegram.send_message(
+                chat_id, render(MESSAGE_LIMIT), markup
             )
+        except TelegramError as exc:
+            # Losing the card entirely would leave the request invisible, so
+            # drop everything Telegram might object to and keep the buttons,
+            # whose callback data is always valid.
+            logger.warning("Card rejected (%s); retrying without links", exc)
+            message = await self.telegram.send_message(
+                chat_id, render(MESSAGE_LIMIT), _callback_rows_only(markup)
+            )
+        return SentMessage(chat_id, message["message_id"], False, notification)
+
+    async def send_approval_request(
+        self, chat_id: int, notification: RequestNotification
+    ) -> None:
+        sent = await self._send_card(
+            chat_id,
+            notification,
+            notification.pending_text,
+            self._action_keyboard(notification),
+        )
+        if notification.request_id:
+            self._remember(str(notification.request_id), sent)
 
     async def _reflect_external_decision(
         self, notification: RequestNotification
@@ -220,23 +266,67 @@ class SeerrTelegramBot:
         decision = (
             "approve" if notification.notification_type != "MEDIA_DECLINED" else "decline"
         )
-        await self._finalize_message(sent, decision, "the Seerr web UI")
+        await self._finalize_message(
+            sent, decision, "the Seerr web UI", _status_for(decision)
+        )
+
+    async def _mark_available(self, notification: RequestNotification) -> None:
+        """Promote an approved card from "waiting" to "available"."""
+        sent = self._sent.get(str(notification.request_id or ""))
+        if sent is None:
+            logger.debug(
+                "Nothing to update for available request %s", notification.request_id
+            )
+            return
+        if sent.decision != "approve":
+            return  # never approved through a card of ours
+
+        await self._finalize_message(
+            sent, sent.decision, sent.actor or "Seerr", STATUS_AVAILABLE
+        )
 
     async def _finalize_message(
-        self, sent: SentMessage, decision: str, actor: str
+        self,
+        sent: SentMessage,
+        decision: str,
+        actor: str,
+        status: str | None = None,
     ) -> None:
-        limit = CAPTION_LIMIT if sent.is_photo else MESSAGE_LIMIT
-        text = sent.notification.resolved_text(decision, actor, limit)
+        """Replace the card rather than editing it, so the outcome pings.
+
+        An edit updates the message silently, which is easy to miss when the
+        card is one of many in a group.
+        """
+        def render(limit: int) -> str:
+            return sent.notification.resolved_text(decision, actor, limit, status)
+
         try:
-            await self.telegram.edit_text(
-                sent.chat_id,
-                sent.message_id,
-                text,
-                is_caption=sent.is_photo,
-                reply_markup=self._link_only_keyboard(sent.notification),
-            )
+            await self.telegram.delete_message(sent.chat_id, sent.message_id)
         except TelegramError as exc:
-            logger.warning("Could not edit message %s: %s", sent.message_id, exc)
+            # Telegram refuses to delete messages older than 48 hours. Strip
+            # the buttons instead so the stale card cannot be tapped again.
+            logger.warning("Could not delete message %s: %s", sent.message_id, exc)
+            with contextlib.suppress(TelegramError):
+                await self.telegram.edit_text(
+                    sent.chat_id,
+                    sent.message_id,
+                    render(CAPTION_LIMIT if sent.is_photo else MESSAGE_LIMIT),
+                    is_caption=sent.is_photo,
+                    reply_markup=None,
+                )
+                return
+
+        replacement = await self._send_card(
+            sent.chat_id,
+            sent.notification,
+            render,
+            self._link_only_keyboard(sent.notification),
+        )
+        replacement.decision = decision
+        replacement.actor = actor
+        request_id = sent.notification.request_id
+        if request_id:
+            self._remember(str(request_id), replacement)
 
     # ---------------------------------------------------------------- updates
 
@@ -247,14 +337,16 @@ class SeerrTelegramBot:
             await self._handle_message(update["message"])
 
     def _is_admin(self, chat_id: Any, user_id: Any) -> bool:
-        """The admin, speaking in their own direct conversation with the bot.
+        """The admin, in a chat this bot is meant to be used from.
 
-        In a private chat the chat ID and the sender's user ID are the same
-        number, so requiring both to match rejects anything that is not that
-        one-to-one conversation.
+        Authority comes from the user ID alone; a group's chat ID is shared by
+        everyone in it and proves nothing. The chat is checked only so the bot
+        stays inert in rooms it was not configured for.
         """
         admin = self.config.admin_chat_id
-        return admin is not None and chat_id == admin and user_id == admin
+        if admin is None or user_id != admin:
+            return False
+        return chat_id in (self.config.target_chat_id, admin)
 
     async def _handle_message(self, message: dict[str, Any]) -> None:
         text = (message.get("text") or "").strip()
@@ -293,8 +385,7 @@ class SeerrTelegramBot:
             )
             await self.telegram.send_message(
                 chat_id,
-                "This bot only takes commands from its admin, in a direct "
-                "conversation.",
+                "This bot only takes commands from its configured admin.",
             )
             return
 
@@ -311,8 +402,11 @@ class SeerrTelegramBot:
         if (chat.get("type") or "private") != "private":
             await self.telegram.send_message(
                 chat_id,
-                "This bot only works in a direct conversation. Message me "
-                "privately and send /start there.",
+                f"This chat's ID: <code>{chat_id}</code>\n\n"
+                "Put it in <code>GROUP_CHAT_ID</code> to have request cards "
+                "delivered here. Approvals stay restricted to the single user "
+                "in <code>ADMIN_CHAT_ID</code>, which you get by sending "
+                "/start to me privately.",
             )
             return
 
@@ -329,9 +423,14 @@ class SeerrTelegramBot:
                 "restart the container. Approval requests will then arrive here.",
             ]
         elif chat_id == self.config.admin_chat_id:
+            where = (
+                f"chat <code>{self.config.group_chat_id}</code>"
+                if self.config.group_chat_id is not None
+                else "here"
+            )
             lines += [
-                "✅ You are the configured admin. "
-                "Pending Seerr requests will arrive here.",
+                f"✅ You are the configured admin, and only you can approve. "
+                f"Request cards are delivered to {where}.",
                 "",
                 "Use /test to verify the Seerr connection.",
             ]
@@ -381,7 +480,8 @@ class SeerrTelegramBot:
             healthy = False
         else:
             lines.append(
-                f"✅ Approvals route to <code>{self.config.admin_chat_id}</code>"
+                f"✅ Cards go to <code>{self.config.target_chat_id}</code>, "
+                f"approvable by <code>{self.config.admin_chat_id}</code>"
             )
         lines.append(
             "ℹ️ To test the other direction, press <b>Test</b> on Seerr's "
@@ -536,10 +636,9 @@ class SeerrTelegramBot:
             await self.telegram.answer_callback(
                 callback_id, f"Already {name} in Seerr.", alert=True
             )
+            decided = "approve" if status == STATUS_APPROVED else "decline"
             await self._finalize_message(
-                sent,
-                "approve" if status == STATUS_APPROVED else "decline",
-                "the Seerr web UI",
+                sent, decided, "the Seerr web UI", _status_for(decided)
             )
             return
 
@@ -555,7 +654,7 @@ class SeerrTelegramBot:
         await self.telegram.answer_callback(
             callback_id, "Approved ✅" if decision == "approve" else "Denied 🚫"
         )
-        await self._finalize_message(sent, decision, actor)
+        await self._finalize_message(sent, decision, actor, _status_for(decision))
 
     # --------------------------------------------------------------- startup
 
@@ -564,7 +663,7 @@ class SeerrTelegramBot:
             return
         try:
             await self.telegram.send_message(
-                self.config.admin_chat_id, "🔄 Seerr approval bot restarted."
+                self.config.target_chat_id, "🔄 Seerr approval bot restarted."
             )
         except TelegramError as exc:
             logger.warning("Start-up notice failed: %s", exc)

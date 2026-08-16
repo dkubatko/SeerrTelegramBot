@@ -17,6 +17,7 @@ class MockTelegram:
         self.sent: list[dict[str, Any]] = []
         self.edits: list[dict[str, Any]] = []
         self.answers: list[dict[str, Any]] = []
+        self.deleted: list[int] = []
         self._pending: list[dict[str, Any]] = []
         self._next_message_id = 500
         self._next_update_id = 1
@@ -29,7 +30,12 @@ class MockTelegram:
         self._new_update.set()
 
     def push_callback(
-        self, data: str, chat_id: int, message_id: int, is_photo: bool = False
+        self,
+        data: str,
+        chat_id: int,
+        message_id: int,
+        is_photo: bool = False,
+        user_id: int | None = None,
     ) -> None:
         message: dict[str, Any] = {"message_id": message_id, "chat": {"id": chat_id}}
         if is_photo:
@@ -43,7 +49,10 @@ class MockTelegram:
                     "id": f"cb{message_id}",
                     "data": data,
                     "message": message,
-                    "from": {"id": chat_id, "username": "tester"},
+                    "from": {
+                        "id": chat_id if user_id is None else user_id,
+                        "username": "tester",
+                    },
                 }
             }
         )
@@ -85,8 +94,14 @@ class MockTelegram:
         return app
 
     async def _http_sent(self, _request: web.Request) -> web.Response:
-        return web.json_response({"sent": self.sent, "edits": self.edits,
-                                  "answers": self.answers})
+        return web.json_response(
+            {
+                "sent": self.sent,
+                "edits": self.edits,
+                "answers": self.answers,
+                "deleted": self.deleted,
+            }
+        )
 
     async def _http_press(self, request: web.Request) -> web.Response:
         """POST /_press?data=approve:1&message_id=501&chat_id=4242"""
@@ -103,11 +118,15 @@ class MockTelegram:
             found = [m for m in self.sent if m["message_id"] == message_id]
             is_photo = bool(found and found[0]["photo"])
 
+        chat_id = int(query.get("chat_id", "4242"))
+        # user_id defaults to chat_id, matching a private chat; pass it
+        # explicitly to imitate another member of a group.
         self.push_callback(
             query.get("data", "approve:1"),
-            int(query.get("chat_id", "4242")),
+            chat_id,
             message_id,
             is_photo,
+            user_id=int(query["user_id"]) if "user_id" in query else None,
         )
         return web.json_response({"pressed": query.get("data"), "message_id": message_id})
 
@@ -170,6 +189,12 @@ class MockTelegram:
             }
         )
         return {"message_id": params.get("message_id")}
+
+    async def _do_deletemessage(self, params: dict[str, Any]) -> bool:
+        # `sent` stays an append-only log of everything the bot posted, so
+        # tests can count reliably across a delete-and-resend.
+        self.deleted.append(params.get("message_id"))
+        return True
 
     async def _do_answercallbackquery(self, params: dict[str, Any]) -> bool:
         self.answers.append(
