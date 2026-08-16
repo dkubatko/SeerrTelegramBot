@@ -35,6 +35,7 @@ HELP_TEXT = (
     "/test — check the connection to Seerr without creating anything\n"
     "/status — pending and approved request counts\n"
     "/pending — list open requests with Approve / Deny buttons\n"
+    "/description on|off — show or hide the synopsis on new cards\n"
     "/help — this message"
 )
 
@@ -67,6 +68,10 @@ class SeerrTelegramBot:
         self._lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ utils
+
+    @property
+    def _with_description(self) -> bool:
+        return bool(self.store.preferences.get("descriptions", True))
 
     def _action_keyboard(self, notification: RequestNotification) -> dict[str, Any]:
         rows: list[list[dict[str, Any]]] = [
@@ -154,7 +159,7 @@ class SeerrTelegramBot:
             return 200, "ok"
 
         if self.config.forward_other_notifications:
-            text = notification.pending_text(MESSAGE_LIMIT)
+            text = notification.pending_text(MESSAGE_LIMIT, self._with_description)
             header = f"<b>{esc(notification.event or kind)}</b>\n"
             await self.telegram.send_message(
                 self.config.target_chat_id, header + text, disable_preview=True
@@ -215,7 +220,7 @@ class SeerrTelegramBot:
         sent = await self._send_card(
             chat_id,
             notification,
-            notification.pending_text,
+            lambda limit: notification.pending_text(limit, self._with_description),
             self._action_keyboard(notification),
         )
         if notification.request_id:
@@ -267,7 +272,7 @@ class SeerrTelegramBot:
             self.config.target_chat_id,
             notification,
             lambda limit: notification.resolved_text(
-                "approve", None, limit, STATUS_WAITING
+                "approve", None, limit, STATUS_WAITING, self._with_description
             ),
             self._link_only_keyboard(notification),
         )
@@ -309,7 +314,9 @@ class SeerrTelegramBot:
         card is one of many in a group.
         """
         def render(limit: int) -> str:
-            return sent.notification.resolved_text(decision, actor, limit, status)
+            return sent.notification.resolved_text(
+                decision, actor, limit, status, self._with_description
+            )
 
         try:
             await self.telegram.delete_message(sent.chat_id, sent.message_id)
@@ -373,7 +380,9 @@ class SeerrTelegramBot:
             return
 
         # Commands may be typed with the bot's handle, as /start@MySeerrBot.
-        command = text.split()[0].lstrip("/").split("@")[0].lower()
+        words = text.split()
+        command = words[0].lstrip("/").split("@")[0].lower()
+        argument = words[1].lower() if len(words) > 1 else ""
 
         if command in {"start", "id"}:
             await self._cmd_start(chat_id, chat)
@@ -411,6 +420,8 @@ class SeerrTelegramBot:
             await self._cmd_status(chat_id)
         elif command == "pending":
             await self._cmd_pending(chat_id)
+        elif command == "description":
+            await self._cmd_description(chat_id, argument)
         else:
             await self.telegram.send_message(chat_id, HELP_TEXT)
 
@@ -504,6 +515,25 @@ class SeerrTelegramBot:
             "webhook notification settings page."
         )
         return healthy, "\n".join(lines)
+
+    async def _cmd_description(self, chat_id: int, argument: str) -> None:
+        if argument in ("on", "off"):
+            self.store.set_preference("descriptions", argument == "on")
+            state = "shown on" if argument == "on" else "hidden from"
+            await self.telegram.send_message(
+                chat_id,
+                f"Synopsis is now <b>{state}</b> new cards. "
+                "Cards already sent are unchanged.",
+            )
+            logger.info("Descriptions turned %s", argument)
+            return
+
+        current = "on" if self._with_description else "off"
+        await self.telegram.send_message(
+            chat_id,
+            f"Synopsis is <b>{current}</b>.\n"
+            "Use <code>/description on</code> or <code>/description off</code>.",
+        )
 
     async def _cmd_status(self, chat_id: int) -> None:
         try:

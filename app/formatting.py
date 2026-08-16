@@ -74,19 +74,28 @@ class RequestNotification:
         kind = "movie" if self.media_type == "movie" else "tv"
         return f"{seerr_url}/{kind}/{self.tmdb_id}"
 
-    def pending_text(self, limit: int) -> str:
-        return self._compose(limit)
+    def pending_text(self, limit: int, with_description: bool = True) -> str:
+        return self._compose(limit, with_description=with_description)
 
     def resolved_text(
-        self, decision: str, actor: str | None, limit: int, status: str | None = None
+        self,
+        decision: str,
+        actor: str | None,
+        limit: int,
+        status: str | None = None,
+        with_description: bool = True,
     ) -> str:
         """`actor` of None means Seerr approved it on its own."""
         verdict = DECISIONS.get(decision, "Updated")
         line = f"{verdict} by <b>{esc(actor)}</b>" if actor else f"{verdict} automatically"
-        return self._compose(limit, line, status)
+        return self._compose(limit, line, status, with_description)
 
     def _compose(
-        self, limit: int, decision: str | None = None, status: str | None = None
+        self,
+        limit: int,
+        decision: str | None = None,
+        status: str | None = None,
+        with_description: bool = True,
     ) -> str:
         """Title and description, then request details, then who is involved.
 
@@ -112,7 +121,7 @@ class RequestNotification:
         spent = len(title) + sum(len(p) + 2 for p in paragraphs)
         room = limit - spent - len("\n<i></i>")
         description = ""
-        if self.overview and room >= MIN_DESCRIPTION:
+        if with_description and self.overview and room >= MIN_DESCRIPTION:
             description = f"\n<i>{_truncate_escaped(esc(self.overview), room)}</i>"
 
         return "\n\n".join([title + description, *paragraphs])

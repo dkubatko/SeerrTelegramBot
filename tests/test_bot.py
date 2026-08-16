@@ -1115,6 +1115,54 @@ class TestCommands(unittest.IsolatedAsyncioTestCase):
         status, _ = await bot.handle_webhook(pending_payload(REQUESTS["1"]))
         self.assertEqual(status, 503)
 
+    async def test_description_reports_its_current_state(self):
+        bot, telegram, _ = build_bot()
+        await bot.handle_update(self._message("/description"))
+
+        self.assertIn("Synopsis is <b>on</b>", telegram.sent[0]["text"])
+
+    async def test_description_off_hides_the_synopsis_on_new_cards(self):
+        bot, telegram, _ = build_bot()
+        await bot.handle_update(self._message("/description off"))
+        await bot.handle_webhook(pending_payload(REQUESTS["3"]))
+
+        card = telegram.sent[-1]["text"]
+        self.assertNotIn("Walter White", card)
+        self.assertIn("Breaking Bad", card)
+        self.assertIn("Requested Seasons", card)
+
+    async def test_description_on_restores_it(self):
+        bot, telegram, _ = build_bot()
+        await bot.handle_update(self._message("/description off"))
+        await bot.handle_update(self._message("/description ON"))
+        await bot.handle_webhook(pending_payload(REQUESTS["3"]))
+
+        self.assertIn("Walter White", telegram.sent[-1]["text"])
+
+    async def test_the_setting_also_applies_to_resolved_cards(self):
+        bot, telegram, _ = build_bot()
+        await bot.handle_webhook(pending_payload(REQUESTS["3"]))
+        await bot.handle_update(self._message("/description off"))
+        await bot.handle_update({"callback_query": callback("approve:3")})
+
+        card = telegram.sent[-1]["text"]
+        self.assertNotIn("Walter White", card)
+        self.assertIn("Approved by <b>@dan</b>", card)
+
+    async def test_a_bad_argument_explains_itself(self):
+        bot, telegram, _ = build_bot()
+        await bot.handle_update(self._message("/description maybe"))
+
+        self.assertIn("/description on", telegram.sent[0]["text"])
+        self.assertTrue(bot._with_description, "an unclear argument changes nothing")
+
+    async def test_non_admins_cannot_change_it(self):
+        bot, telegram, _ = build_bot()
+        await bot.handle_update(self._message("/description off", chat_id=999))
+
+        self.assertTrue(bot._with_description)
+        self.assertIn("configured admin", telegram.sent[0]["text"])
+
     async def test_non_command_text_is_ignored(self):
         bot, telegram, _ = build_bot()
         await bot.handle_update(self._message("hello there"))

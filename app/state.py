@@ -90,6 +90,7 @@ class MessageStore:
         self.limit = limit
         self.messages: OrderedDict[str, SentMessage] = OrderedDict()
         self.decided: OrderedDict[str, str] = OrderedDict()
+        self.preferences: dict[str, Any] = {}
         self._writable = True
         self._load()
 
@@ -113,6 +114,10 @@ class MessageStore:
             self.decided.popitem(last=False)
         self.save()
 
+    def set_preference(self, key: str, value: Any) -> None:
+        self.preferences[key] = value
+        self.save()
+
     def pop_decided(self, request_id: str) -> str | None:
         decision = self.decided.pop(request_id, None)
         if decision is not None:
@@ -129,6 +134,7 @@ class MessageStore:
             for request_id, data in (raw.get("messages") or {}).items():
                 self.messages[request_id] = SentMessage.from_dict(data)
             self.decided.update(raw.get("decided") or {})
+            self.preferences.update(raw.get("preferences") or {})
         except (OSError, ValueError, KeyError, TypeError) as exc:
             logger.warning(
                 "Ignoring unreadable state file %s (%s); starting empty",
@@ -137,6 +143,7 @@ class MessageStore:
             )
             self.messages.clear()
             self.decided.clear()
+            self.preferences.clear()
             return
         logger.info(
             "Restored %d tracked message(s) from %s", len(self.messages), self.path
@@ -148,6 +155,7 @@ class MessageStore:
         payload = {
             "messages": {k: v.to_dict() for k, v in self.messages.items()},
             "decided": dict(self.decided),
+            "preferences": self.preferences,
         }
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
