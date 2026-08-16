@@ -17,6 +17,7 @@ DECISIONS = {
 # Progress after approval, shown as the card's last paragraph.
 STATUS_WAITING = "⏳ Waiting for download"
 STATUS_AVAILABLE = "▶️ Available in Plex"
+STATUS_FAILED = "⚠️ Failed to process"
 
 # Shortest description worth keeping; below this the line is just noise.
 MIN_DESCRIPTION = 40

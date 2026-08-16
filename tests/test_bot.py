@@ -653,6 +653,65 @@ class TestProgressStatus(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Waiting for download", card)
         self.assertIn("Approved by <b>@dan</b>", card, "the decider is preserved")
 
+    async def test_failure_replaces_the_waiting_line(self):
+        bot, telegram, _ = await self._approve()
+        before = len(telegram.sent)
+
+        await bot.handle_webhook(
+            {"notification_type": "MEDIA_FAILED", "request": {"request_id": "1"}}
+        )
+
+        self.assertEqual(len(telegram.sent), before + 1, "should re-send, not edit")
+        card = telegram.sent[-1]["text"]
+        self.assertTrue(card.endswith("⚠️ Failed to process"))
+        self.assertNotIn("Waiting for download", card)
+        self.assertIn("Approved by <b>@dan</b>", card)
+
+    async def test_a_failure_can_still_recover_to_available(self):
+        bot, telegram, _ = await self._approve()
+        for kind in ("MEDIA_FAILED", "MEDIA_AVAILABLE"):
+            await bot.handle_webhook(
+                {"notification_type": kind, "request": {"request_id": "1"}}
+            )
+
+        self.assertTrue(telegram.sent[-1]["text"].endswith("▶️ Available in Plex"))
+
+    async def test_failure_for_an_untracked_request_is_ignored(self):
+        bot, telegram, _ = build_bot()
+        status, _ = await bot.handle_webhook(
+            {"notification_type": "MEDIA_FAILED", "request": {"request_id": "77"}}
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(telegram.sent, [])
+
+    async def test_failure_does_not_touch_a_denied_card(self):
+        bot, telegram, _ = build_bot()
+        await bot.handle_webhook(pending_payload(REQUESTS["1"]))
+        await bot.handle_update({"callback_query": callback("decline:1")})
+        after_denial = len(telegram.sent)
+
+        await bot.handle_webhook(
+            {"notification_type": "MEDIA_FAILED", "request": {"request_id": "1"}}
+        )
+
+        self.assertEqual(len(telegram.sent), after_denial)
+
+    async def test_an_auto_approved_card_can_fail_too(self):
+        bot, telegram, _ = build_bot()
+        await bot.handle_webhook(
+            pending_payload(REQUESTS["1"])
+            | {"notification_type": "MEDIA_AUTO_APPROVED"}
+        )
+
+        await bot.handle_webhook(
+            {"notification_type": "MEDIA_FAILED", "request": {"request_id": "1"}}
+        )
+
+        card = telegram.sent[-1]["text"]
+        self.assertTrue(card.endswith("⚠️ Failed to process"))
+        self.assertIn("Approved automatically", card)
+
     async def test_availability_for_an_untracked_request_is_ignored(self):
         bot, telegram, _ = build_bot()
         status, _ = await bot.handle_webhook(

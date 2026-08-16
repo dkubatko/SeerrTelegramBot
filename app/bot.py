@@ -12,6 +12,7 @@ from .formatting import (
     CAPTION_LIMIT,
     MESSAGE_LIMIT,
     STATUS_AVAILABLE,
+    STATUS_FAILED,
     STATUS_WAITING,
     RequestNotification,
     actor_name,
@@ -139,7 +140,11 @@ class SeerrTelegramBot:
             return 200, "ok"
 
         if kind == "MEDIA_AVAILABLE":
-            await self._mark_available(notification)
+            await self._update_status(notification, STATUS_AVAILABLE)
+            return 200, "ok"
+
+        if kind == "MEDIA_FAILED":
+            await self._update_status(notification, STATUS_FAILED)
             return 200, "ok"
 
         if self.config.forward_other_notifications:
@@ -255,20 +260,25 @@ class SeerrTelegramBot:
         if request_id:
             self.store.remember(request_id, sent)
 
-    async def _mark_available(self, notification: RequestNotification) -> None:
-        """Promote an approved card from "waiting" to "available"."""
+    async def _update_status(
+        self, notification: RequestNotification, status: str
+    ) -> None:
+        """Move an approved card to its next state, keeping who decided it.
+
+        Only approved requests have a journey to report; a denied one is
+        finished, and a pending one has not started.
+        """
         sent = self.store.get(str(notification.request_id or ""))
         if sent is None:
             logger.debug(
-                "Nothing to update for available request %s", notification.request_id
+                "No card tracked for request %s; nothing to update",
+                notification.request_id,
             )
             return
         if sent.decision != "approve":
-            return  # never approved through a card of ours
+            return
 
-        await self._finalize_message(
-            sent, sent.decision, sent.actor, STATUS_AVAILABLE
-        )
+        await self._finalize_message(sent, sent.decision, sent.actor, status)
 
     async def _finalize_message(
         self,

@@ -23,7 +23,8 @@ Works with Overseerr, Jellyseerr, and Seerr — they share the same API.
 - Approves or declines in Seerr when you tap a button, then replaces the card
    with the outcome and who decided it, so the result arrives as a notification.
 - Follows the request onward: an approved card reads "Waiting for download",
-  and becomes "Available in Plex" once Seerr says the media has landed.
+  then "Available in Plex" once the media lands, or "Failed to process" if it
+  never does.
 - Notices when a request was already resolved in the web UI and says so instead
   of silently doing nothing.
 - `/start` replies with your Telegram chat ID, so you know what to put in
@@ -91,7 +92,7 @@ In Seerr → **Settings → Notifications → Webhook**:
 | Webhook URL | `http://<bot-host>:8420/webhook` |
 | Authorization Header | same string as `WEBHOOK_AUTH_TOKEN`, or blank |
 | JSON Payload | **leave the default** |
-| Notification Types | **Request Pending Approval**, **Request Approved**, **Request Declined**, **Request Automatically Approved**, **Request Available** |
+| Notification Types | **Request Pending Approval**, **Request Approved**, **Request Declined**, **Request Automatically Approved**, **Request Available**, **Request Processing Failed** |
 
 The bot parses Seerr's stock payload, so there is no JSON to edit. If you have
 customized it, make sure it still contains `notification_type`, `subject`,
@@ -109,7 +110,8 @@ replaces the matching Telegram card with the outcome, instead of leaving a
 stale one you might tap later. Automatically Approved posts a card for a
 request Seerr approved on its own — there is nothing to decide, so it arrives
 with no buttons and reads "Approved automatically". Available carries any of
-them one step further, from "Waiting for download" to "Available in Plex". Deciding from Telegram makes
+them one step further, from "Waiting for download" to "Available in Plex", or
+to "Failed to process" if Radarr or Sonarr could not take the request. Deciding from Telegram makes
 Seerr echo the same events back, and the bot recognizes its own decisions and
 ignores the echo, so you get one card and one final state either way.
 
@@ -275,7 +277,7 @@ is needed: the bot polls Telegram, and only Seerr needs to reach port 8420.
 | `PORT` | no | `8420` | Webhook listener port |
 | `WEBHOOK_PATH` | no | `/webhook` | Webhook path; `POST /` also works |
 | `LOG_LEVEL` | no | `INFO` | `DEBUG` logs every payload and update |
-| `FORWARD_OTHER_NOTIFICATIONS` | no | `false` | Relay notification types the bot has no card for (available, failed, issues) to the admin chat as plain text |
+| `FORWARD_OTHER_NOTIFICATIONS` | no | `false` | Relay notification types the bot has no card for (issue events) to the delivery chat as plain text |
 | `NOTIFY_ON_START` | no | `false` | Send a short message to the admin chat on boot |
 | `STATE_FILE` | no | `/data/state.json` | Where the request-to-message index is kept; set to empty for memory only |
 | `SEERR_TIMEOUT` | no | `15` | Seconds before a Seerr call gives up |
