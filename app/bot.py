@@ -224,17 +224,27 @@ class SeerrTelegramBot:
     async def _reflect_external_decision(
         self, notification: RequestNotification
     ) -> None:
-        """Update a pending message that was resolved in the Seerr web UI."""
+        """Show a decision made in the Seerr web UI rather than from a button."""
         request_id = str(notification.request_id or "")
         sent = self.store.get(request_id)
         if not sent:
             return
-        if self.store.pop_decided(request_id):
-            return  # this webhook is an echo of our own button press
 
         decision = (
-            "approve" if notification.notification_type != "MEDIA_DECLINED" else "decline"
+            "decline" if notification.notification_type == "MEDIA_DECLINED" else "approve"
         )
+
+        # Only the same decision we just made is an echo of our own press. A
+        # different one is a real change in the web UI and has to be shown --
+        # and clearing a stale claim here keeps it from swallowing that.
+        if self.store.pop_decided(request_id) == decision:
+            return
+
+        if sent.decision == decision:
+            # The card already says this. A repeated notification would only
+            # re-credit it to the web UI, or undo a later "available".
+            return
+
         await self._finalize_message(
             sent, decision, "the Seerr web UI", _status_for(decision)
         )

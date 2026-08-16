@@ -635,6 +635,61 @@ class TestDecisions(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(telegram.sent), before, "no duplicate card")
 
+    async def test_a_web_ui_decision_still_shows_when_nothing_was_claimed(self):
+        bot, telegram, _ = build_bot()
+        await bot.handle_webhook(pending_payload(REQUESTS["1"]))
+
+        await bot.handle_webhook(
+            {"notification_type": "MEDIA_APPROVED", "request": {"request_id": "1"}}
+        )
+
+        self.assertIn("Approved by <b>the Seerr web UI</b>", telegram.sent[-1]["text"])
+
+    async def test_a_stale_claim_cannot_swallow_the_opposite_decision(self):
+        """Approve from chat, then decline in the web UI: the card must follow.
+
+        If Seerr is not configured to send Approved notifications, the claim
+        from the button press is never consumed, and it must not be mistaken
+        for the later decline.
+        """
+        bot, telegram, _ = build_bot()
+        await bot.handle_webhook(pending_payload(REQUESTS["1"]))
+        await bot.handle_update({"callback_query": callback("approve:1")})
+
+        await bot.handle_webhook(
+            {"notification_type": "MEDIA_DECLINED", "request": {"request_id": "1"}}
+        )
+
+        self.assertIn("Denied by <b>the Seerr web UI</b>", telegram.sent[-1]["text"])
+
+    async def test_a_repeated_notification_keeps_the_original_credit(self):
+        bot, telegram, _ = build_bot()
+        await bot.handle_webhook(pending_payload(REQUESTS["1"]))
+        await bot.handle_update({"callback_query": callback("approve:1")})
+
+        for _ in range(3):  # the echo, then two replays
+            await bot.handle_webhook(
+                {"notification_type": "MEDIA_APPROVED", "request": {"request_id": "1"}}
+            )
+
+        cards = [m for m in telegram.sent if "Approved" in m["text"]]
+        self.assertEqual(len(cards), 1)
+        self.assertIn("@dan", cards[0]["text"])
+
+    async def test_a_late_approval_echo_cannot_undo_available(self):
+        bot, telegram, _ = build_bot()
+        await bot.handle_webhook(pending_payload(REQUESTS["1"]))
+        await bot.handle_update({"callback_query": callback("approve:1")})
+        await bot.handle_webhook(
+            {"notification_type": "MEDIA_AVAILABLE", "request": {"request_id": "1"}}
+        )
+
+        await bot.handle_webhook(
+            {"notification_type": "MEDIA_APPROVED", "request": {"request_id": "1"}}
+        )
+
+        self.assertTrue(telegram.sent[-1]["text"].endswith("▶️ Available in Plex"))
+
     async def test_press_from_another_user_in_the_chat_is_rejected(self):
         """Identity comes from the sender, never from the chat alone."""
         bot, telegram, seerr = build_bot()
